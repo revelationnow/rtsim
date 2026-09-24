@@ -10,6 +10,7 @@ export default defineConfig({
   base: process.env.BASE_PATH ?? './',
   plugins: [react(), tailwindcss(), ...(single ? [viteSingleFile()] : [])],
   worker: { format: 'es' },
+  define: { __SINGLE_FILE__: JSON.stringify(single) },
   build: { outDir: single ? 'dist-single' : 'dist', chunkSizeWarningLimit: 2000 },
   test: {
     environment: 'node',

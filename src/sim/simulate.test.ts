@@ -339,3 +339,23 @@ describe('peakWindowAverage', () => {
     expect(peakWindowAverage(t, v, 100, 1)).toBe(1);
   });
 });
+
+describe('poisson trigger', () => {
+  it('draws exponential gaps with the requested mean', () => {
+    const r = run(
+      base(
+        [{ id: 'p', trigger: { type: 'poisson', interval: '100 us' }, steps: [{ id: 'x', kind: 'delay', time: '1 us' }] }],
+        { sim: { duration: '1 s', seed: 5 } },
+      ),
+    );
+    const jobs = wp(r, 'p').jobs;
+    const gaps = jobs.slice(1).map((j, i) => j.activation - jobs[i].activation);
+    const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+    const cv = Math.sqrt(gaps.reduce((a, g) => a + (g - mean) ** 2, 0) / gaps.length) / mean;
+    // ~10k arrivals: mean within 3%, coefficient of variation ≈ 1 for an exponential.
+    expect(mean / (100 * US)).toBeGreaterThan(0.97);
+    expect(mean / (100 * US)).toBeLessThan(1.03);
+    expect(cv).toBeGreaterThan(0.95);
+    expect(cv).toBeLessThan(1.05);
+  });
+});

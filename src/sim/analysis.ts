@@ -179,7 +179,7 @@ export function analyze(cm: CompiledModel): Analysis {
     })),
     ...cm.resources.map((r, i) => ({
       id: r.id,
-      name: r.id,
+      name: `${r.ownerKind === 'memory' ? cm.memories[cm.kinds.get(r.owner)!.idx].name : cm.buses[cm.kinds.get(r.owner)!.idx].name}${r.lane === 'rd' ? ' (read)' : r.lane === 'wr' ? ' (write)' : ''}`,
       kind: r.ownerKind,
       capacity: r.capBps,
       demand: total(link[i]),

@@ -121,7 +121,20 @@ export interface SimResult {
   trace: Trace;
   warnings: string[];
   /** Resolved step and component names for the timeline. */
-  names: { procs: string[]; procCores: number[]; wps: string[]; steps: string[][]; stepKinds: string[][]; transferRes: string[][][] };
+  names: {
+    procs: string[];
+    procCores: number[];
+    wps: string[];
+    steps: string[][];
+    stepKinds: string[][];
+    /** Resource ids each transfer step streams through. */
+    transferRes: string[][][];
+    /** The DMA id a transfer step queues on, or '' when mastered by a processor. */
+    transferDma: string[][];
+    dmas: string[];
+    dmaChannels: number[];
+    deadlines: (number | null)[];
+  };
 }
 
 export interface SimFailure {

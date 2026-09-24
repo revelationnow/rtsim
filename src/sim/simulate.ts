@@ -512,8 +512,10 @@ export function simulate(cm: CompiledModel, opts: SimOptions = {}): SimResult {
     } else if (tr.type === 'poisson') {
       const fire = (k: number, from: number) => {
         if (k >= tr.count) return;
-        const gap = Math.max(tr.minPs, triggerTime(ws, tr.interval, k));
-        if (tr.interval.constant && gap === 0) throw new SimError(`${ws.wp.id}.trigger: interval is zero`);
+        const mean = triggerTime(ws, tr.interval, k);
+        if (mean <= 0 && tr.minPs <= 0) throw new SimError(`${ws.wp.id}.trigger: mean interval must be positive`);
+        // Exponential gaps make arrivals a Poisson process with the given mean interval.
+        const gap = Math.max(tr.minPs, Math.round(ws.trigRng.exponential(mean)));
         const at = from + gap;
         if (at > T) return;
         q.schedule(at, () => {
@@ -708,6 +710,10 @@ export function simulate(cm: CompiledModel, opts: SimOptions = {}): SimResult {
       transferRes: cm.workplans.map((w) =>
         w.steps.map((s) => (s.kind === 'transfer' ? s.path.usage.map((u) => cm.resources[u.res].id) : [])),
       ),
+      transferDma: cm.workplans.map((w) => w.steps.map((s) => (s.kind === 'transfer' && s.path.dma >= 0 ? cm.dmas[s.path.dma].id : ''))),
+      dmas: cm.dmas.map((d) => d.id),
+      dmaChannels: cm.dmas.map((d) => d.channels),
+      deadlines: cm.workplans.map((w) => w.deadlinePs),
     },
   };
 }

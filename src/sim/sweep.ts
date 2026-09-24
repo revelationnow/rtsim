@@ -93,6 +93,7 @@ export interface SolveSpec {
 
 export interface SolveResult {
   status: 'found' | 'all-pass' | 'none-pass' | 'error';
+  unit: string;
   /** The boundary value that just satisfies the criterion. */
   value?: number;
   /** Direction: 'min' when larger values pass (find the smallest), 'max' otherwise. */
@@ -127,6 +128,7 @@ export function solve(model: Model, spec: SolveSpec, onProgress?: (done: number,
   const tol = spec.tolerance ?? 0.002;
   const maxIter = spec.maxIter ?? 30;
   const trials: SolveResult['trials'] = [];
+  const unit = spec.unit;
   const expected = Math.min(maxIter, Math.ceil(Math.log2(1 / tol)) + 2);
   const test = (v: number): boolean | string => {
     const r = runMetrics(model, { [spec.param]: `${v} ${spec.unit}`.trim() });
@@ -137,13 +139,13 @@ export function solve(model: Model, spec: SolveSpec, onProgress?: (done: number,
   };
   let lo = spec.lo;
   let hi = spec.hi;
-  if (!(hi > lo)) return { status: 'error', message: 'the upper bound must exceed the lower bound', trials };
+  if (!(hi > lo)) return { unit, status: 'error', message: 'the upper bound must exceed the lower bound', trials };
   const pLo = test(lo);
-  if (typeof pLo === 'string') return { status: 'error', message: pLo, trials };
+  if (typeof pLo === 'string') return { unit, status: 'error', message: pLo, trials };
   const pHi = test(hi);
-  if (typeof pHi === 'string') return { status: 'error', message: pHi, trials };
-  if (pLo && pHi) return { status: 'all-pass', value: lo, message: 'Both ends of the range pass; widen the range to find the boundary.', trials };
-  if (!pLo && !pHi) return { status: 'none-pass', message: 'Neither end of the range passes.', trials };
+  if (typeof pHi === 'string') return { unit, status: 'error', message: pHi, trials };
+  if (pLo && pHi) return { unit, status: 'all-pass', value: lo, message: 'Both ends of the range pass; widen the range to find the boundary.', trials };
+  if (!pLo && !pHi) return { unit, status: 'none-pass', message: 'Neither end of the range passes.', trials };
   const direction = pHi ? 'min' : 'max';
   // Invariant: `good` passes, `bad` fails.
   let good = pHi ? hi : lo;
@@ -151,13 +153,14 @@ export function solve(model: Model, spec: SolveSpec, onProgress?: (done: number,
   for (let i = 0; i < maxIter && Math.abs(good - bad) > tol * Math.max(Math.abs(hi), Math.abs(lo), 1e-300); i++) {
     const mid = (good + bad) / 2;
     const p = test(mid);
-    if (typeof p === 'string') return { status: 'error', message: p, trials };
+    if (typeof p === 'string') return { unit, status: 'error', message: p, trials };
     if (p) good = mid;
     else bad = mid;
   }
   lo = Math.min(good, bad);
   hi = Math.max(good, bad);
   return {
+    unit,
     status: 'found',
     value: good,
     direction,
