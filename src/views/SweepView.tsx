@@ -444,7 +444,8 @@ function SolveResults() {
           height={150}
         />
         <Legend items={[{ name: 'passes', color: 'var(--good)' }, { name: 'fails', color: 'var(--critical)' }]} />
-        <table className="tbl mt-2">
+        <div className="overflow-x-auto mt-2">
+        <table className="tbl">
           <thead>
             <tr>
               <th>#</th>
@@ -462,6 +463,7 @@ function SolveResults() {
             ))}
           </tbody>
         </table>
+        </div>
       </Card>
     </>
   );

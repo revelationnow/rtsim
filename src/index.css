@@ -237,6 +237,7 @@ table.tbl td.r,
 table.tbl th.r {
   text-align: right;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 table.tbl tr.sel td {
   background: var(--accent-wash);

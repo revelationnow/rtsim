@@ -42,7 +42,7 @@ export function RequirementsView() {
       <Card
         title="Resource demand vs capacity"
         actions={
-          <label className="flex items-center gap-2 text-[12px] text-ink-2">
+          <label className="flex flex-wrap items-center gap-2 text-[12px] text-ink-2">
             Target max utilization
             <input type="range" min={0.3} max={1} step={0.05} value={target} onChange={(e) => setTarget(Number(e.target.value))} />
             <span className="num w-[36px]">{Math.round(target * 100)}%</span>
@@ -50,7 +50,8 @@ export function RequirementsView() {
         }
         pad={false}
       >
-        <table className="tbl">
+        <div className="overflow-x-auto">
+        <table className="tbl min-w-[760px]">
           <thead>
             <tr>
               <th>Resource</th>
@@ -109,6 +110,7 @@ export function RequirementsView() {
             })}
           </tbody>
         </table>
+        </div>
         <div className="border-t border-line px-3 py-2 text-[12px] text-muted">
           Bus and memory demand counts every byte each resource carries: a copy through a DMA on a shared bus crosses it twice. Click a row for the
           per-workplan split.
@@ -117,6 +119,7 @@ export function RequirementsView() {
 
       <div className="grid gap-3 lg:grid-cols-2">
         <Card title="Latency lower bound vs deadline" pad={false}>
+          <div className="overflow-x-auto">
           <table className="tbl">
             <thead>
               <tr>
@@ -151,12 +154,14 @@ export function RequirementsView() {
               })}
             </tbody>
           </table>
+          </div>
           <div className="border-t border-line px-3 py-2 text-[12px] text-muted">
             Longest dependency chain with each step alone on its resource. A negative slack means no amount of scheduling can meet the deadline.
           </div>
         </Card>
 
         <Card title="Activation rates" pad={false}>
+          <div className="overflow-x-auto">
           <table className="tbl">
             <thead>
               <tr>
@@ -175,6 +180,7 @@ export function RequirementsView() {
               ))}
             </tbody>
           </table>
+          </div>
         </Card>
       </div>
     </div>

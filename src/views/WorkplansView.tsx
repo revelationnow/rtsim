@@ -1,6 +1,6 @@
 import dagre from '@dagrejs/dagre';
 import { Background, Handle, MarkerType, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type Node, type NodeProps } from '@xyflow/react';
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { newStep, newWorkplan, removeStep, removeWorkplan, renameStep, renameWorkplan } from '../model/edit';
 import type { Expr, StepSpec, TriggerSpec, WorkplanSpec } from '../model/types';
 import { Card, Empty, ExprField, Field, IdField, Select, Swatch, TextField } from '../ui/components';
@@ -30,8 +30,8 @@ export function WorkplansView() {
   const wp = model.workplans.find((w) => w.id === selectedWp) ?? model.workplans[0];
 
   return (
-    <div className="flex h-full min-h-0">
-      <aside className="w-[250px] shrink-0 overflow-auto border-r border-line bg-surface p-2">
+    <div className="flex h-full min-h-0 flex-col md:flex-row">
+      <aside className="max-h-[220px] w-full shrink-0 overflow-auto border-b border-line bg-surface p-2 md:max-h-none md:w-[250px] md:border-b-0 md:border-r">
         <div className="flex items-center justify-between px-1 pb-2">
           <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">Workplans</span>
           <button
@@ -75,6 +75,7 @@ function WorkplanEditor({ wp, index }: { wp: WorkplanSpec; index: number }) {
   const scope = useParamScope();
   const run = useStore((s) => s.run);
   const res = run.result?.workplans.find((w) => w.id === wp.id);
+  const [confirming, setConfirming] = useState(false);
 
   const edit = (fn: (w: WorkplanSpec) => void, key?: string) =>
     update((m) => {
@@ -89,7 +90,7 @@ function WorkplanEditor({ wp, index }: { wp: WorkplanSpec; index: number }) {
 
   return (
     <div className="mx-auto max-w-[1180px] space-y-3">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Swatch color={seriesVar(index)} />
         <h2 className="text-[16px] font-semibold">{wp.name || wp.id}</h2>
         {res ? (
@@ -101,16 +102,28 @@ function WorkplanEditor({ wp, index }: { wp: WorkplanSpec; index: number }) {
           </span>
         ) : null}
         <div className="flex-1" />
-        <button
-          className="btn sm"
-          onClick={() => {
-            if (!confirm(`Delete workplan "${wp.id}"?`)) return;
-            update((m) => removeWorkplan(m, wp.id));
-            selectWp(null);
-          }}
-        >
-          Delete workplan
-        </button>
+        {confirming ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="text-[12px] text-ink-2">Delete "{wp.id}"?</span>
+            <button
+              className="btn sm"
+              style={{ borderColor: 'var(--critical)', color: 'var(--critical)' }}
+              onClick={() => {
+                update((m) => removeWorkplan(m, wp.id));
+                selectWp(null);
+              }}
+            >
+              Delete
+            </button>
+            <button className="btn sm ghost" onClick={() => setConfirming(false)}>
+              Keep
+            </button>
+          </span>
+        ) : (
+          <button className="btn sm" onClick={() => setConfirming(true)}>
+            Delete workplan
+          </button>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">

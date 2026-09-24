@@ -83,6 +83,7 @@ export function ParamsView() {
           Named values usable in any expression, e.g. <code>ddr_bw = 12.8 GB/s</code> then a memory bandwidth of <code>ddr_bw</code>. Parameters may refer
           to earlier ones. Sweeps and the solver vary one parameter at a time, so put the knobs you want to scope here.
         </p>
+        <div className="overflow-x-auto">
         <table className="tbl">
           <thead>
             <tr>
@@ -123,6 +124,7 @@ export function ParamsView() {
             ))}
           </tbody>
         </table>
+        </div>
       </Card>
 
       <Card title="Simulation settings">

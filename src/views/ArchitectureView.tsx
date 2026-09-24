@@ -98,13 +98,13 @@ const nodeTypes = { comp: ComponentNode };
 
 export function ArchitectureView() {
   return (
-    <div className="flex h-full min-h-0">
-      <div className="relative min-w-0 flex-1">
+    <div className="flex h-full min-h-0 flex-col lg:flex-row">
+      <div className="relative min-h-[420px] min-w-0 flex-1">
         <ReactFlowProvider>
           <Diagram />
         </ReactFlowProvider>
       </div>
-      <aside className="w-[380px] shrink-0 overflow-auto border-l border-line bg-page p-3">
+      <aside className="w-full shrink-0 overflow-auto border-t border-line bg-page p-3 lg:w-[380px] lg:border-l lg:border-t-0">
         <Inspector />
       </aside>
     </div>
@@ -255,7 +255,7 @@ function Diagram() {
     >
       <Background gap={20} size={1} />
       <Controls showInteractive={false} />
-      <div className="absolute left-3 top-3 z-10 flex gap-1.5">
+      <div className="absolute left-3 right-3 top-3 z-10 flex flex-wrap gap-1.5">
         {(['processor', 'memory', 'bus', 'dma'] as ComponentKind[]).map((k) => (
           <button
             key={k}
@@ -280,7 +280,7 @@ function Diagram() {
           Auto-layout
         </button>
       </div>
-      <div className="absolute bottom-3 left-14 z-10 rounded-md bg-surface/90 px-2 py-1 text-[11px] text-muted">
+      <div className="absolute bottom-3 left-14 right-3 z-10 hidden rounded-md sm:block bg-surface/90 px-2 py-1 text-[11px] text-muted">
         Drag from a handle to link components · select + Delete to remove{run.result ? ' · bars show average utilization from the last run' : ''}
       </div>
     </ReactFlow>

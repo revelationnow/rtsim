@@ -257,7 +257,8 @@ function WorkplanDetail({ w, color }: { w: WorkplanResult; color: string }) {
           <Legend items={CATEGORY.filter((c) => mean.some((m) => m.label === c.label) || worstParts.some((m) => m.label === c.label)).map((c) => ({ name: c.label, color: c.color }))} />
         </div>
         {w.worst ? (
-          <table className="tbl mt-3">
+          <div className="overflow-x-auto mt-3">
+          <table className="tbl">
             <thead>
               <tr>
                 <th>Worst job, step by step</th>
@@ -285,9 +286,11 @@ function WorkplanDetail({ w, color }: { w: WorkplanResult; color: string }) {
               ))}
             </tbody>
           </table>
+          </div>
         ) : null}
       </Card>
       <Card title="Steps" pad={false} className="xl:col-span-2">
+        <div className="overflow-x-auto">
         <table className="tbl">
           <thead>
             <tr>
@@ -320,6 +323,7 @@ function WorkplanDetail({ w, color }: { w: WorkplanResult; color: string }) {
             ))}
           </tbody>
         </table>
+        </div>
       </Card>
     </div>
   );
@@ -404,6 +408,7 @@ function ResourcesCard({ r }: { r: SimResult }) {
           )}
         </Card>
         <Card title="Buffer footprint" pad={false}>
+          <div className="overflow-x-auto">
           <table className="tbl">
             <thead>
               <tr>
@@ -424,6 +429,7 @@ function ResourcesCard({ r }: { r: SimResult }) {
               ))}
             </tbody>
           </table>
+          </div>
           <div className="border-t border-line px-3 py-2 text-[11.5px] text-muted">
             Data written into a memory is held from the start of the write until every step that consumes it has finished.
           </div>

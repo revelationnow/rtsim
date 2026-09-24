@@ -14,6 +14,8 @@ import { SweepView } from './views/SweepView';
 import { TimelineView } from './views/TimelineView';
 import { WorkplansView } from './views/WorkplansView';
 
+declare const __SINGLE_FILE__: boolean;
+
 const NAV: { group: string; items: { id: View; label: string; hint: string }[] }[] = [
   {
     group: 'Model',
@@ -71,6 +73,7 @@ export function App() {
   return (
     <div className="flex h-full flex-col">
       <Header />
+      <MobileNav />
       <div className="flex min-h-0 flex-1">
         <Sidebar />
         <main className="min-w-0 flex-1 overflow-auto">
@@ -97,6 +100,14 @@ function Header() {
   const [msg, setMsg] = useState<string | null>(null);
 
   const download = (name: string, text: string, type: string) => {
+    if (__SINGLE_FILE__) {
+      navigator.clipboard.writeText(text).then(
+        () => setMsg(`Copied ${name.split('.').pop()!.toUpperCase()} to the clipboard — paste it into a file to keep it`),
+        () => setMsg('Copying was blocked here; open the Source view and copy the YAML from there'),
+      );
+      setTimeout(() => setMsg(null), 5000);
+      return;
+    }
     const url = URL.createObjectURL(new Blob([text], { type }));
     const a = document.createElement('a');
     a.href = url;
@@ -107,7 +118,7 @@ function Header() {
   const slug = model.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'model';
 
   return (
-    <header className="flex h-[48px] shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
+    <header className="flex min-h-[48px] shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line bg-surface px-3 py-1.5 md:px-3">
       <div className="flex items-center gap-2">
         <svg width="22" height="22" viewBox="0 0 32 32" aria-hidden>
           <rect width="32" height="32" rx="7" fill="var(--accent)" />
@@ -116,12 +127,12 @@ function Header() {
         <span className="text-[14px] font-semibold tracking-tight">RTSim</span>
       </div>
       <input
-        className="ctl max-w-[320px] !border-transparent bg-transparent font-medium hover:!border-[var(--line-strong)]"
+        className="ctl min-w-0 max-w-[320px] !border-transparent bg-transparent font-medium hover:!border-[var(--line-strong)]"
         value={model.name}
         onChange={(e) => update((m) => void (m.name = e.target.value), 'name')}
         aria-label="Model name"
       />
-      <div className="flex items-center gap-1">
+      <div className="flex flex-wrap items-center gap-1">
         <select
           className="ctl !w-[118px]"
           value=""
@@ -163,10 +174,10 @@ function Header() {
             setTimeout(() => setMsg(null), 4000);
           }}
         />
-        <button className="btn ghost" onClick={() => download(`${slug}.yaml`, toYaml(model), 'text/yaml')} title="Download the model as YAML">
-          Save YAML
+        <button className="btn ghost" onClick={() => download(`${slug}.yaml`, toYaml(model), 'text/yaml')} title={__SINGLE_FILE__ ? 'Copy the model as YAML' : 'Download the model as YAML'}>
+          {__SINGLE_FILE__ ? 'Copy YAML' : 'Save YAML'}
         </button>
-        <button className="btn ghost" onClick={() => download(`${slug}.json`, JSON.stringify(model, null, 2), 'application/json')} title="Download the model as JSON">
+        <button className="btn ghost" onClick={() => download(`${slug}.json`, JSON.stringify(model, null, 2), 'application/json')} title={__SINGLE_FILE__ ? 'Copy the model as JSON' : 'Download the model as JSON'}>
           JSON
         </button>
         <span className="mx-1 h-5 w-px bg-[var(--line)]" />
@@ -234,6 +245,32 @@ function RunControls() {
   );
 }
 
+/** On narrow screens the sidebar gives way to a view picker. */
+function MobileNav() {
+  const view = useStore((s) => s.view);
+  const setView = useStore((s) => s.setView);
+  const c = useCompiled();
+  const errors = c.issues.filter((i) => i.severity === 'error');
+  return (
+    <div className="flex items-center gap-2 border-b border-line bg-surface px-4 py-2 md:hidden">
+      <select className="ctl" value={view} onChange={(e) => setView(e.target.value as View)} aria-label="View">
+        {NAV.map((g) => (
+          <optgroup key={g.group} label={g.group}>
+            {g.items.map((it) => (
+              <option key={it.id} value={it.id}>
+                {it.label}
+              </option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+      <span className={`shrink-0 text-[12px] ${errors.length ? 'text-critical' : 'text-good-ink'}`}>
+        {errors.length ? `${errors.length} error${errors.length > 1 ? 's' : ''}` : '✓ valid'}
+      </span>
+    </div>
+  );
+}
+
 function Sidebar() {
   const view = useStore((s) => s.view);
   const setView = useStore((s) => s.setView);
@@ -248,7 +285,7 @@ function Sidebar() {
   const [open, setOpen] = useState(true);
 
   return (
-    <nav className="flex w-[208px] shrink-0 flex-col border-r border-line bg-surface">
+    <nav className="hidden w-[208px] shrink-0 flex-col border-r border-line bg-surface md:flex">
       <div className="flex-1 overflow-auto p-2">
         {NAV.map((g) => (
           <div key={g.group} className="mb-3">
