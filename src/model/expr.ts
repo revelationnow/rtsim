@@ -163,7 +163,7 @@ export function compileExpr(e: unknown, scope: Record<string, unknown>, dynamic:
     try {
       return { src: e, constant: true, value: code.evaluate({ ...scope }) };
     } catch (err) {
-      throw new ExprError(`cannot evaluate "${e}": ${(err as Error).message}`);
+      throw new ExprError(`cannot evaluate "${e}": ${explain(err as Error)}`);
     }
   }
   return { src: e, constant: false, code };
@@ -174,8 +174,16 @@ export function evalExpr(c: CExpr, scope: Record<string, unknown>): unknown {
   try {
     return c.code!.evaluate(scope);
   } catch (err) {
-    throw new ExprError(`cannot evaluate "${c.src}": ${(err as Error).message}`);
+    throw new ExprError(`cannot evaluate "${c.src}": ${explain(err as Error)}`);
   }
+}
+
+/** Turns mathjs's type errors into advice about the usual cause: mixing plain numbers and units. */
+function explain(e: Error): string {
+  if (/Unexpected type of argument.*Unit/.test(e.message) || /Units do not match/.test(e.message)) {
+    return 'a plain number is mixed with a unit — give every term a unit (e.g. "64 B + 256 KiB")';
+  }
+  return e.message;
 }
 
 /** Evaluate a one-off expression (params, component fields) against a scope. */
@@ -212,7 +220,13 @@ export function toBase(v: unknown, q: Quantity): number {
     if (q === 'count') throw new ExprError(`expected a plain number, got ${v.toString()}`);
     const ref = REF[q];
     if (q === 'freq' && v.equalBase(math.unit('1/s'))) return v.toNumber('Hz');
-    if (!v.equalBase(ref.unit)) throw new ExprError(`${v.toString()} is not ${ref.hint}`);
+    if (!v.equalBase(ref.unit)) {
+      const inverted = q === 'time' && v.equalBase(math.unit('Hz'));
+      throw new ExprError(
+        `${v.toString()} is not ${ref.hint}` +
+          (inverted ? ' — note "1/x s" means 1/(x s); write "1 s / x"' : ''),
+      );
+    }
     const n = v.toNumber(ref.base);
     if (!Number.isFinite(n)) throw new ExprError(`value is ${n}`);
     return n;

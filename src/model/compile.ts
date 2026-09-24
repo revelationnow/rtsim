@@ -114,11 +114,19 @@ export interface CDelayStep extends CStepBase {
 
 export type CStep = CComputeStep | CTransferStep | CDelayStep;
 
-export type CTrigger =
+export type CTrigger = { repeat: number } & (
   | { type: 'periodic'; periodPs: number; offsetPs: number; jitter: CExpr | null; count: number }
   | { type: 'poisson'; interval: CExpr; minPs: number; count: number }
-  | { type: 'event'; sources: { wp: number; step: number }[]; mode: 'any' | 'all'; every: number; delay: CExpr | null }
-  | { type: 'times'; timesPs: number[] };
+  | {
+      type: 'event';
+      sources: { wp: number; step: number }[];
+      mode: 'any' | 'all';
+      every: number;
+      consume: 'fifo' | 'latest';
+      delay: CExpr | null;
+    }
+  | { type: 'times'; timesPs: number[] }
+);
 
 export interface CWorkplan {
   idx: number;
@@ -158,6 +166,8 @@ export interface CompileOptions {
 }
 
 export type CompileResult = { ok: true; model: CompiledModel; issues: Issue[] } | { ok: false; issues: Issue[] };
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 const ID_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const RESERVED = new Set(['job', 't', 'in_bytes']);
@@ -549,7 +559,7 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
       e2eDeadlinePs:
         w.e2eDeadline === undefined || w.e2eDeadline === '' ? null : sToPs(num(`${path}.e2eDeadline`, w.e2eDeadline, 'time')),
       priority,
-      maxInFlight: w.maxInFlight && w.maxInFlight > 0 ? w.maxInFlight : Infinity,
+      maxInFlight: maxInFlight(`${path}.maxInFlight`, w.maxInFlight),
       onOverrun: w.onOverrun ?? 'skip',
       vars,
       steps,
@@ -558,7 +568,24 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
     };
   });
 
+  function maxInFlight(path: string, e: Expr | undefined): number {
+    if (e === undefined || e === '' || e === 0) return Infinity;
+    const v = num(path, e, 'count');
+    if (Number.isFinite(v) && (v < 1 || !Number.isInteger(v))) err(path, 'must be a whole number ≥ 1 (or empty for unlimited)');
+    return v;
+  }
+
   function compileTrigger(path: string, t: TriggerSpec | undefined): CTrigger {
+    const inner = compileTriggerInner(path, t);
+    let repeat = 1;
+    if (t && t.repeat !== undefined && t.repeat !== '') {
+      repeat = num(`${path}.repeat`, t.repeat, 'count');
+      if (Number.isFinite(repeat) && (repeat < 1 || !Number.isInteger(repeat))) err(`${path}.repeat`, 'must be a whole number ≥ 1');
+    }
+    return { ...inner, repeat } as CTrigger;
+  }
+
+  function compileTriggerInner(path: string, t: TriggerSpec | undefined): DistributiveOmit<CTrigger, 'repeat'> {
     const tExpr = (p: string, e: Expr | undefined): CExpr | null => {
       if (e === undefined || e === '' || e === 0 || e === '0') return null;
       try {
@@ -612,7 +639,14 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
         }
         if (sources.length === 0) err(`${path}.sources`, 'an event trigger needs at least one source');
         const every = t.every && t.every >= 1 ? Math.floor(t.every) : 1;
-        return { type: 'event', sources, mode: t.mode ?? 'any', every, delay: tExpr(`${path}.delay`, t.delay) };
+        return {
+          type: 'event',
+          sources,
+          mode: t.mode ?? 'any',
+          every,
+          consume: t.consume ?? 'fifo',
+          delay: tExpr(`${path}.delay`, t.delay),
+        };
       }
       case 'times':
         return {

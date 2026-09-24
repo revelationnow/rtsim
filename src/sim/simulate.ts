@@ -198,9 +198,11 @@ export function simulate(cm: CompiledModel, opts: SimOptions = {}): SimResult {
   // ---- job lifecycle --------------------------------------------------------
 
   const activate = (ws: WpState, activation: number, origin: number, jitterPs: number) => {
-    ws.activations++;
-    if (jitterPs > 0) q.schedule(q.now + jitterPs, () => admit(ws, activation, origin));
-    else admit(ws, activation, origin);
+    for (let r = 0; r < ws.wp.trigger.repeat; r++) {
+      ws.activations++;
+      if (jitterPs > 0) q.schedule(q.now + jitterPs, () => admit(ws, activation, origin));
+      else admit(ws, activation, origin);
+    }
   };
 
   const admit = (ws: WpState, activation: number, origin: number) => {
@@ -473,7 +475,10 @@ export function simulate(cm: CompiledModel, opts: SimOptions = {}): SimResult {
     for (const { target, src } of ls) {
       const tr = target.wp.trigger;
       if (tr.type !== 'event') continue;
-      target.tokens[src].push(origin);
+      const tokens = target.tokens[src];
+      tokens.push(origin);
+      // 'latest' keeps only as many tokens as one firing needs, dropping the oldest.
+      if (tr.consume === 'latest' && tokens.length > tr.every) tokens.splice(0, tokens.length - tr.every);
       let consumed: number[] | null = null;
       if (tr.mode === 'all') {
         if (target.tokens.every((tk) => tk.length >= tr.every)) {

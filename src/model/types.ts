@@ -65,11 +65,30 @@ export interface DmaSpec {
   policy?: 'fifo' | 'priority';
 }
 
+/**
+ * `repeat` fans one firing out into several activations at the same instant (e.g. one job
+ * per tile of a frame); combine it with maxInFlight to model a pipeline.
+ */
 export type TriggerSpec =
-  | { type: 'periodic'; period: Expr; offset?: Expr; jitter?: Expr; count?: number }
-  | { type: 'poisson'; interval: Expr; minInterval?: Expr; count?: number }
-  | { type: 'event'; sources: string[]; mode?: 'any' | 'all'; every?: number; delay?: Expr }
-  | { type: 'times'; times: Expr[] };
+  | { type: 'periodic'; period: Expr; offset?: Expr; jitter?: Expr; count?: number; repeat?: Expr }
+  | { type: 'poisson'; interval: Expr; minInterval?: Expr; count?: number; repeat?: Expr }
+  | {
+      type: 'event';
+      sources: string[];
+      /** 'any': each source completion counts; 'all': fire once every source has produced. */
+      mode?: 'any' | 'all';
+      /** Completions needed per firing (decimation). */
+      every?: number;
+      /**
+       * 'fifo': every completion is a token that must be consumed in order (queues build up
+       * when sources outpace the consumer). 'latest': only the newest completion per source is
+       * kept, like sampling a register — the usual semantics for sensor fusion.
+       */
+      consume?: 'fifo' | 'latest';
+      delay?: Expr;
+      repeat?: Expr;
+    }
+  | { type: 'times'; times: Expr[]; repeat?: Expr };
 
 interface StepBase {
   id: string;
@@ -118,7 +137,7 @@ export interface WorkplanSpec {
   e2eDeadline?: Expr;
   priority?: number;
   /** Jobs of this workplan allowed in flight at once. Default unlimited. */
-  maxInFlight?: number;
+  maxInFlight?: Expr;
   /** What happens to an activation when maxInFlight is reached. */
   onOverrun?: 'skip' | 'queue';
   /** Per-job variables, evaluated in order at release; visible to every step expression. */
