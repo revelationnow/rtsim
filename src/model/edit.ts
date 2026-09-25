@@ -1,4 +1,4 @@
-import type { ComponentKind, Model, StepSpec, WorkplanSpec } from './types';
+import type { BusFields, BusTypeSpec, ComponentKind, Model, StepSpec, WorkplanSpec } from './types';
 
 /** Mutating helpers used on a cloned draft; they keep cross-references consistent. */
 
@@ -182,5 +182,77 @@ export function newStep(m: Model, wpId: string, kind: StepSpec['kind']): string 
   if (kind === 'compute') w.steps.push({ id, kind, on: proc, cycles: 100000, after });
   else if (kind === 'transfer') w.steps.push({ id, kind, from: mem, to: proc, bytes: '64 KiB', after });
   else w.steps.push({ id, kind, time: '100 us', after });
+  return id;
+}
+
+// ---- bus types ------------------------------------------------------------------
+
+/** Every field a bus type or bus can set, in editor order. */
+export const BUS_FIELD_KEYS = [
+  'model',
+  'width',
+  'freq',
+  'efficiency',
+  'bandwidth',
+  'latency',
+  'duplex',
+  'direction',
+  'maxPayload',
+  'readPayload',
+  'maxRequest',
+  'header',
+  'packetGap',
+  'arbitration',
+  'switching',
+] as const satisfies readonly (keyof BusFields)[];
+
+export function addBusType(m: Model, template: BusTypeSpec | null): string {
+  const base = template ? structuredClone(template) : { id: 'link', name: 'New bus type', model: 'fluid' as const };
+  const id = uniqueId(base.id, (m.busTypes ?? []).map((t) => t.id));
+  (m.busTypes ??= []).push({ ...base, id });
+  return id;
+}
+
+export function renameBusType(m: Model, from: string, to: string): void {
+  const t = (m.busTypes ?? []).find((x) => x.id === from);
+  if (!t || from === to) return;
+  t.id = to;
+  for (const b of m.buses) if (b.type === from) b.type = to;
+}
+
+export function busTypeUsers(m: Model, id: string): string[] {
+  return m.buses.filter((b) => b.type === id).map((b) => b.id);
+}
+
+export function removeBusType(m: Model, id: string): void {
+  if (busTypeUsers(m, id).length) return;
+  m.busTypes = (m.busTypes ?? []).filter((t) => t.id !== id);
+}
+
+/**
+ * Turns a bus's effective settings (its type's plus its own overrides) into a new bus type,
+ * and points the bus at it with no overrides left. Width and clock stay on the bus.
+ */
+export function saveBusAsType(m: Model, busId: string): string | null {
+  const b = m.buses.find((x) => x.id === busId);
+  if (!b) return null;
+  const parent = (m.busTypes ?? []).find((t) => t.id === b.type);
+  const id = uniqueId(`${b.id}_type`, (m.busTypes ?? []).map((t) => t.id));
+  const t: BusTypeSpec = { id, name: `${b.name || b.id} type` };
+  if (parent?.description) t.description = parent.description;
+  const vars = { ...(parent?.vars ?? {}), ...(b.vars ?? {}) };
+  if (Object.keys(vars).length) t.vars = vars;
+  const keep = new Set(['width', 'freq']);
+  for (const k of BUS_FIELD_KEYS) {
+    const own = b[k];
+    const v = own !== undefined && own !== '' ? own : parent?.[k];
+    if (v === undefined || v === '') continue;
+    if (keep.has(k)) continue;
+    (t as unknown as Record<string, unknown>)[k] = v;
+    delete (b as unknown as Record<string, unknown>)[k];
+  }
+  (m.busTypes ??= []).push(t);
+  b.type = id;
+  delete b.vars;
   return id;
 }

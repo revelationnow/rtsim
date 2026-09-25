@@ -15,15 +15,12 @@ import {
 } from '@xyflow/react';
 import { useEffect, useMemo, useState } from 'react';
 import { addComponent, allComponentIds, hasLink, kindOf, removeComponent, renameComponent } from '../model/edit';
-import type { BusProtocol, BusSpec, ComponentKind, DmaSpec, MemorySpec, Model, ProcessorSpec } from '../model/types';
+import type { BusSpec, ComponentKind, DmaSpec, MemorySpec, Model, ProcessorSpec } from '../model/types';
 import { Card, Checkbox, ExprField, Field, IdField, Select, TextField, UtilBar } from '../ui/components';
 import { fmtBytes, fmtPct, fmtRate } from '../ui/format';
 import { useCompiled, useParamScope } from '../ui/hooks';
-import type { CBus } from '../model/compile';
-import type { ReactNode } from 'react';
+import { BusSettings, BusTypeEditor, BusTypesCard } from './BusEditors';
 import { useStore } from '../ui/store';
-
-const PROTOCOL_LABEL: Record<BusProtocol, string> = { generic: 'Generic', axi: 'AXI', noc: 'NoC', pcie: 'PCIe' };
 
 const KIND_LABEL: Record<ComponentKind, string> = { processor: 'Processor / HW block', memory: 'Memory', bus: 'Bus / interconnect', dma: 'DMA engine' };
 const NODE_W: Record<ComponentKind, number> = { processor: 156, memory: 164, bus: 240, dma: 140 };
@@ -185,7 +182,7 @@ function Diagram() {
           b,
           [
             `${cb ? fmtRate(cb.bwBps) : '?'}${cb?.duplex ? ' per direction' : ''} · ${b.latency ?? '0 ns'}`,
-            cb ? `${PROTOCOL_LABEL[cb.protocol]} · ${cb.mode === 'packet' ? `packets of ${fmtBytes(cb.pkt.payload)}` : 'fluid'}` : '',
+            cb ? `${cb.typeName ?? 'no type'} · ${cb.mode === 'packet' ? `packets of ${fmtBytes(cb.pkt.payload)}` : 'fluid'}` : '',
           ].filter(Boolean),
           cb?.duplex ? [[`${b.id}:rd`, 'rd'], [`${b.id}:wr`, 'wr']] : [[b.id, '']],
         ),
@@ -298,6 +295,8 @@ function Inspector() {
   const model = useStore((s) => s.model);
   const selection = useStore((s) => s.selection);
   const select = useStore((s) => s.select);
+  const selectedBusType = useStore((s) => s.selectedBusType);
+  if (selectedBusType && (model.busTypes ?? []).some((t) => t.id === selectedBusType)) return <BusTypeEditor id={selectedBusType} />;
   if (selection && kindOf(model, selection.id)) return <ComponentEditor id={selection.id} kind={kindOf(model, selection.id)!} />;
 
   const groups: [ComponentKind, { id: string; name?: string }[]][] = [
@@ -330,6 +329,7 @@ function Inspector() {
           </div>
         ))}
       </Card>
+      <BusTypesCard />
       <Card title="Description">
         <textarea
           className="ctl min-h-[90px]"
@@ -438,7 +438,7 @@ function ComponentEditor({ id, kind }: { id: string; kind: ComponentKind }) {
             </Field>
           </>
         )}
-        {kind === 'bus' && <BusFields spec={spec as BusSpec} cb={cb} set={set} expr={expr} />}
+        {kind === 'bus' && <BusSettings bus={spec as BusSpec} compiled={cb} />}
         {kind === 'dma' && (
           <>
             {expr('channels', 'Channels', 'count', 'Concurrent transfers; more requests wait')}
@@ -551,141 +551,3 @@ function ComponentEditor({ id, kind }: { id: string; kind: ComponentKind }) {
   );
 }
 
-/** Bus editor: protocol and model, bandwidth, and packetization with the preset values as hints. */
-function BusFields({
-  spec,
-  cb,
-  set,
-  expr,
-}: {
-  spec: BusSpec;
-  cb: CBus | null | undefined;
-  set: (field: string, v: unknown) => void;
-  expr: (field: string, label: string, kind: Parameters<typeof ExprField>[0]['kind'], hint?: string, optional?: boolean) => ReactNode;
-}) {
-  const protocol = spec.protocol ?? 'generic';
-  const mode = spec.model ?? (protocol === 'generic' ? 'fluid' : 'packet');
-  const pkt = cb?.pkt;
-  const perPacket = pkt && Number.isFinite(pkt.payload) ? pkt.payload / (pkt.payload + pkt.headerBytes + (pkt.gapPs / 1e12) * cb!.bwBps) : null;
-  const hint = (v: string) => `${v} (${PROTOCOL_LABEL[protocol]} default)`;
-  return (
-    <>
-      <Field label="Protocol" hint="Fills in packet size, header, arbitration and switching defaults">
-        <Select
-          value={protocol}
-          options={[
-            { value: 'generic', label: 'Generic' },
-            { value: 'axi', label: 'AXI (bursts on separate R/W channels)' },
-            { value: 'noc', label: 'NoC (flits, wormhole routing)' },
-            { value: 'pcie', label: 'PCIe (TLPs over serial lanes)' },
-          ]}
-          onChange={(v) => set('protocol', v === 'generic' ? undefined : v)}
-        />
-      </Field>
-      <Field label="Model" hint="Fluid shares bandwidth as continuous flows (fast). Packet arbitrates and serializes every packet, so small transfers see real waits.">
-        <Select
-          value={mode}
-          options={[
-            { value: 'fluid', label: 'Fluid (average bandwidth sharing)' },
-            { value: 'packet', label: 'Packet level (per-packet arbitration and latency)' },
-          ]}
-          onChange={(v) => set('model', v === (protocol === 'generic' ? 'fluid' : 'packet') ? undefined : v)}
-        />
-      </Field>
-      {protocol === 'pcie' ? (
-        <>
-          <Field label="Generation">
-            <Select
-              value={String(spec.gen ?? 4)}
-              options={['1', '2', '3', '4', '5', '6'].map((g) => ({ value: g, label: `Gen ${g} (${{ 1: 2.5, 2: 5, 3: 8, 4: 16, 5: 32, 6: 64 }[g]} GT/s)` }))}
-              onChange={(v) => set('gen', v === '4' ? undefined : Number(v))}
-            />
-          </Field>
-          <Field label="Lanes">
-            <Select value={String(spec.lanes ?? 4)} options={['1', '2', '4', '8', '16'].map((l) => ({ value: l, label: `x${l}` }))} onChange={(v) => set('lanes', v === '4' ? undefined : Number(v))} />
-          </Field>
-          {expr('efficiency', 'Efficiency', 'count', 'Share of the encoded rate left after DLLPs, flow control and SKP ordered sets (default 0.95)')}
-        </>
-      ) : (
-        <>
-          {expr('width', 'Data width', 'bytes', 'e.g. "128 bit"')}
-          {expr('freq', 'Clock', 'freq')}
-          {expr('efficiency', 'Efficiency', 'count', 'Fraction of width × clock achievable (0–1). Packet headers and gaps are counted separately below.')}
-        </>
-      )}
-      {expr('bandwidth', 'Bandwidth override', 'bandwidth', 'Set this to give the link bandwidth directly')}
-      <Field label="Effective">
-        <span className="num pt-1 text-ink-2">
-          {cb ? `${fmtRate(cb.bwBps)}${cb.duplex ? ' per direction' : ''}` : '—'}
-          {perPacket !== null && perPacket < 1 ? ` · ${(perPacket * 100).toFixed(1)}% payload at full packets` : ''}
-        </span>
-      </Field>
-      {expr('latency', mode === 'packet' ? 'Latency per packet' : 'Hop latency', 'time', 'Arbitration + pipeline latency per traversal')}
-      <Field label="Duplex">
-        <Checkbox checked={cb?.duplex ?? spec.duplex ?? false} onChange={(v) => set('duplex', v)} label="Separate read and write channels" />
-      </Field>
-      <div className="mt-2 border-t border-line pt-2 text-[11px] font-semibold uppercase tracking-wide text-muted">Packets</div>
-      <Field label="Max payload" hint="Largest data payload per packet: AXI burst length × width, NoC packet size, PCIe Max Payload Size">
-        <ExprPlaceholder field="maxPayload" spec={spec} set={set} kind="bytes" placeholder={pkt && Number.isFinite(pkt.payload) ? hint(fmtBytes(pkt.payload)) : 'no packets'} />
-      </Field>
-      {protocol === 'pcie' || spec.readPayload !== undefined ? (
-        <Field label="Read completion" hint="Payload per completion for data returned to a reader; root complexes often split completions at 64 or 128 B">
-          <ExprPlaceholder field="readPayload" spec={spec} set={set} kind="bytes" placeholder={pkt ? hint(fmtBytes(pkt.readPayload)) : ''} />
-        </Field>
-      ) : null}
-      {protocol === 'pcie' || spec.maxRequest !== undefined ? (
-        <Field label="Max read request" hint="Bytes per read request (PCIe MRRS); the initiator's outstanding limit counts these">
-          <ExprPlaceholder field="maxRequest" spec={spec} set={set} kind="bytes" placeholder={pkt ? hint(fmtBytes(pkt.maxRequest)) : ''} />
-        </Field>
-      ) : null}
-      <Field label="Header" hint="Overhead bytes serialized with each packet: header flit, TLP header + sequence + LCRC + framing">
-        <ExprPlaceholder field="header" spec={spec} set={set} kind="bytes" placeholder={pkt ? hint(fmtBytes(pkt.headerBytes)) : ''} />
-      </Field>
-      <Field label="Gap per packet" hint="Idle link time between packets, e.g. an AXI arbitration bubble">
-        <ExprPlaceholder field="packetGap" spec={spec} set={set} kind="time" placeholder={pkt ? hint(pkt.gapPs ? `${pkt.gapPs / 1000} ns` : '0') : ''} />
-      </Field>
-      {mode === 'packet' ? (
-        <>
-          <Field label="Arbitration">
-            <Select
-              value={spec.arbitration ?? 'round-robin'}
-              options={[
-                { value: 'round-robin', label: 'Round-robin between initiators' },
-                { value: 'priority', label: 'Priority (higher first)' },
-                { value: 'fifo', label: 'FIFO (arrival order)' },
-              ]}
-              onChange={(v) => set('arbitration', v === 'round-robin' ? undefined : v)}
-            />
-          </Field>
-          <Field label="Switching" hint="Cut-through (wormhole) forwards a packet once its header is through; store-and-forward waits for the whole packet at each hop">
-            <Select
-              value={spec.switching ?? (pkt?.cutThrough ? 'cut-through' : 'store-and-forward')}
-              options={[
-                { value: 'cut-through', label: 'Cut-through' },
-                { value: 'store-and-forward', label: 'Store-and-forward' },
-              ]}
-              onChange={(v) => set('switching', v)}
-            />
-          </Field>
-        </>
-      ) : null}
-    </>
-  );
-}
-
-function ExprPlaceholder({
-  field,
-  spec,
-  set,
-  kind,
-  placeholder,
-}: {
-  field: keyof BusSpec;
-  spec: BusSpec;
-  set: (field: string, v: unknown) => void;
-  kind: Parameters<typeof ExprField>[0]['kind'];
-  placeholder: string;
-}) {
-  const scope = useParamScope();
-  return <ExprField value={spec[field] as string | number | undefined} kind={kind} scope={scope} optional placeholder={placeholder} onChange={(v) => set(field, v)} />;
-}

@@ -38,39 +38,40 @@ export interface MemorySpec {
   duplex?: boolean;
 }
 
-export type BusProtocol = 'generic' | 'axi' | 'noc' | 'pcie';
-
-export interface BusSpec {
-  id: string;
-  name?: string;
+/**
+ * Everything that describes how a bus behaves. A bus type sets these as defaults; a bus that
+ * uses the type may override any of them. Expressions can use params, the type's `vars`, and
+ * the bus's own `width` and `freq` (e.g. a payload of "16 * width" or a gap of "1 / freq").
+ */
+export interface BusFields {
   /**
    * 'fluid': transfers share bandwidth as continuous flows (fast, average behaviour).
    * 'packet': transfers are split into packets that are arbitrated and served one at a time,
-   * each paying serialization and hop latency. Defaults to 'packet' for the AXI, NoC and PCIe
-   * protocols and 'fluid' otherwise.
+   * each paying serialization and hop latency.
    */
   model?: 'fluid' | 'packet';
-  /** Fills in packet-size, header, arbitration and switching defaults for that protocol. */
-  protocol?: BusProtocol;
   /** Data-path width, e.g. "128 bit" or 16. Used with freq when bandwidth is not given. */
   width?: Expr;
   freq?: Expr;
-  /** Fraction of the raw bandwidth that is achievable (protocol overhead not modelled per packet). */
+  /** Fraction of width x freq that is achievable (headers and gaps are counted separately). */
   efficiency?: Expr;
-  /** Overrides width x freq x efficiency (or PCIe gen x lanes) when set. */
+  /** Overrides width x freq x efficiency when set; any expression, e.g. lanes * lane_rate. */
   bandwidth?: Expr;
-  /** PCIe generation (1–6) and link width, used for bandwidth when it is not given. */
-  gen?: number;
-  lanes?: number;
   /** Latency added per traversal (arbitration + pipeline stages); per packet in packet mode. */
   latency?: Expr;
-  /** Separate read and write data channels, as on AXI. Defaults on for AXI, NoC and PCIe. */
+  /** Two independent lanes instead of one shared one. */
   duplex?: boolean;
+  /**
+   * What the two duplex lanes mean. 'initiator': read and write channels relative to whoever
+   * masters the transfer (AXI, NoC request/response). 'physical': the two directions of a
+   * point-to-point link (PCIe, serial links), which must connect exactly two components.
+   */
+  direction?: 'initiator' | 'physical';
   /** Largest data payload per packet (AXI burst, NoC packet, PCIe max payload size). */
   maxPayload?: Expr;
   /** Payload per packet for data flowing back to a reader (PCIe completions); defaults to maxPayload. */
   readPayload?: Expr;
-  /** Bytes per request (PCIe max read request size, default 512 B); unlimited for other protocols. */
+  /** Largest request (PCIe max read request size); unlimited when not set. */
   maxRequest?: Expr;
   /** Overhead bytes serialized with every packet (header flit, TLP header + framing + CRC). */
   header?: Expr;
@@ -80,6 +81,28 @@ export interface BusSpec {
   arbitration?: 'round-robin' | 'priority' | 'fifo';
   /** Packet mode: 'cut-through' forwards a packet once its header arrives (wormhole). */
   switching?: 'store-and-forward' | 'cut-through';
+}
+
+/** A reusable bus definition kept in the model: AXI, a NoC, PCIe, or anything you define. */
+export interface BusTypeSpec extends BusFields {
+  id: string;
+  name?: string;
+  description?: string;
+  /** Variables for this type's expressions, e.g. lanes and lane_rate; buses may override them. */
+  vars?: Record<string, Expr>;
+}
+
+export interface BusSpec extends BusFields {
+  id: string;
+  name?: string;
+  /** Id of a bus type in the model's busTypes; its fields are this bus's defaults. */
+  type?: string;
+  /** Overrides for the type's vars. */
+  vars?: Record<string, Expr>;
+  /** Older models only: converted to `type` (and vars) when the model is loaded. */
+  protocol?: string;
+  gen?: number;
+  lanes?: number;
 }
 
 export interface DmaSpec {
@@ -200,6 +223,8 @@ export interface Model {
   params?: Record<string, Expr>;
   processors: ProcessorSpec[];
   memories: MemorySpec[];
+  /** Reusable bus definitions that buses refer to by `type`. */
+  busTypes?: BusTypeSpec[];
   buses: BusSpec[];
   dmas?: DmaSpec[];
   /** Undirected topology edges between component ids. */

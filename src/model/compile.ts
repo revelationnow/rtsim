@@ -1,5 +1,5 @@
 import { compileExpr, evaluate, ExprError, toBase, type CExpr, type Quantity } from './expr';
-import type { BusProtocol, BusSpec, ComponentKind, Expr, Model, SchedPolicy, StepSpec, TriggerSpec } from './types';
+import type { BusFields, BusSpec, BusTypeSpec, ComponentKind, Expr, Model, SchedPolicy, StepSpec, TriggerSpec } from './types';
 
 /** Simulation time is integer picoseconds: exact up to ~2.5 hours of simulated time. */
 export const PS_PER_S = 1e12;
@@ -37,7 +37,7 @@ export interface CMemory {
   resWrite: number;
 }
 
-/** Packetization parameters of a bus (resolved from its protocol preset and overrides). */
+/** Packetization parameters of a bus (resolved from its type and its own overrides). */
 export interface CPacketParams {
   payload: number;
   readPayload: number;
@@ -52,8 +52,11 @@ export interface CBus {
   idx: number;
   id: string;
   name: string;
-  protocol: BusProtocol;
+  /** Bus type id and display name, when the bus uses one. */
+  type: string | null;
+  typeName: string | null;
   mode: 'fluid' | 'packet';
+  direction: 'initiator' | 'physical';
   bwBps: number;
   latPs: number;
   duplex: boolean;
@@ -220,15 +223,11 @@ export interface CompileOptions {
 
 export type CompileResult = { ok: true; model: CompiledModel; issues: Issue[] } | { ok: false; issues: Issue[] };
 
-/** PCIe per-lane signalling rate (GT/s) and line-encoding efficiency by generation. */
-const PCIE: Record<number, { gt: number; enc: number }> = {
-  1: { gt: 2.5, enc: 0.8 },
-  2: { gt: 5, enc: 0.8 },
-  3: { gt: 8, enc: 128 / 130 },
-  4: { gt: 16, enc: 128 / 130 },
-  5: { gt: 32, enc: 128 / 130 },
-  6: { gt: 64, enc: 242 / 256 },
-};
+/** Points an undefined-symbol error at where the name can be defined. */
+function hintUndefined(msg: string): string {
+  const m = /Undefined symbol (\w+)/.exec(msg);
+  return m ? `${msg} — set ${m[1]} on this bus, or as a variable of its bus type or a parameter` : msg;
+}
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
@@ -341,54 +340,101 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
     };
   });
 
+  // ---- bus types --------------------------------------------------------------
+  const busTypes = new Map<string, BusTypeSpec>();
+  (model.busTypes ?? []).forEach((t) => {
+    const path = `busTypes.${t.id}`;
+    if (!t.id || !ID_RE.test(t.id)) err(path, `"${t.id}" is not a valid id`);
+    else if (busTypes.has(t.id)) err(path, `duplicate bus type "${t.id}"`);
+    else busTypes.set(t.id, t);
+  });
+
   const packetLanes: CPacketLane[] = [];
   const buses: CBus[] = model.buses.map((b: BusSpec, idx) => {
     const path = `buses.${b.id}`;
     claim(path, b.id, 'bus', idx);
-    const protocol: BusProtocol = b.protocol ?? 'generic';
-    const mode = b.model ?? (protocol === 'generic' ? 'fluid' : 'packet');
-    const given = (v: Expr | undefined) => v !== undefined && v !== '';
-    const opt = (field: keyof BusSpec, q: Quantity): number | null =>
-      given(b[field] as Expr | undefined) ? num(`${path}.${field}`, b[field] as Expr, q) : null;
+    let type: BusTypeSpec | undefined;
+    if (b.type) {
+      type = busTypes.get(b.type);
+      if (!type) err(`${path}.type`, `unknown bus type "${b.type}"`);
+    }
+    const given = (v: unknown) => v !== undefined && v !== '';
+    /** A field's value: the bus's own, else its type's. */
+    const field = <K extends keyof BusFields>(k: K): BusFields[K] => (given(b[k]) ? b[k] : type?.[k]);
+    const fieldPath = (k: string) => (given((b as unknown as Record<string, unknown>)[k]) || !type ? `${path}.${k}` : `busTypes.${type.id}.${k} (bus ${b.id})`);
+
+    // Expression scope: params, then the type's vars with this bus's overrides, then width and freq.
+    const scope: Record<string, unknown> = { ...params };
+    const typeVars = type?.vars ?? {};
+    const varNames = [...Object.keys(typeVars), ...Object.keys(b.vars ?? {}).filter((k) => !(k in typeVars))];
+    for (const name of varNames) {
+      const own = b.vars?.[name];
+      const vp = given(own) || !type ? `${path}.vars.${name}` : `busTypes.${type.id}.vars.${name}`;
+      if (!ID_RE.test(name) || name.includes('-') || RESERVED.has(name)) {
+        err(vp, 'variable names must be identifiers');
+        continue;
+      }
+      try {
+        scope[name] = evaluate(given(own) ? own : typeVars[name], scope);
+      } catch (e2) {
+        err(vp, (e2 as Error).message);
+      }
+    }
+    const raw = (k: keyof BusFields): unknown => {
+      const e = field(k);
+      if (!given(e)) return undefined;
+      try {
+        return evaluate(e, scope);
+      } catch (e2) {
+        err(fieldPath(k), hintUndefined((e2 as Error).message));
+        return null;
+      }
+    };
+    const opt = (k: keyof BusFields, q: Quantity): number | null => {
+      const v = raw(k);
+      if (v === undefined) return null;
+      if (v === null) return NaN;
+      try {
+        return toBase(v, q);
+      } catch (e2) {
+        err(fieldPath(k), (e2 as Error).message);
+        return NaN;
+      }
+    };
+    // Width and clock are visible to the other fields' expressions ("16 * width", "1 / freq").
+    const widthRaw = raw('width');
+    const freqRaw = raw('freq');
+    if (widthRaw !== undefined && widthRaw !== null) scope.width = widthRaw;
+    if (freqRaw !== undefined && freqRaw !== null) scope.freq = freqRaw;
     const width = opt('width', 'bytes');
     const freq = opt('freq', 'freq');
-    const eff = opt('efficiency', 'count') ?? (protocol === 'pcie' ? 0.95 : 1);
-    if (Number.isFinite(eff) && (eff <= 0 || eff > 1)) err(`${path}.efficiency`, 'must be in (0, 1]');
+    const mode = field('model') ?? 'fluid';
+    const eff = opt('efficiency', 'count') ?? 1;
+    if (Number.isFinite(eff) && (eff <= 0 || eff > 1)) err(fieldPath('efficiency'), 'must be in (0, 1]');
     let bwBps: number;
-    if (given(b.bandwidth)) {
-      bwBps = num(`${path}.bandwidth`, b.bandwidth, 'bandwidth');
-    } else if (protocol === 'pcie') {
-      const gen = b.gen ?? 4;
-      const lanes = b.lanes ?? 4;
-      if (!PCIE[gen]) err(`${path}.gen`, 'PCIe generation must be 1 to 6');
-      if (![1, 2, 4, 8, 16, 32].includes(lanes)) warn(`${path}.lanes`, 'PCIe links are normally x1, x2, x4, x8, x16 or x32');
-      const g = PCIE[gen] ?? PCIE[4];
-      bwBps = (lanes * g.gt * 1e9 * g.enc * eff) / 8;
-    } else if (width !== null && freq !== null) {
-      bwBps = width * freq * eff;
-    } else {
-      err(`${path}.bandwidth`, protocol === 'generic' ? 'give either bandwidth, or width and freq' : 'give bandwidth, or width and freq');
+    const bw = opt('bandwidth', 'bandwidth');
+    if (bw !== null) bwBps = bw;
+    else if (width !== null && freq !== null) bwBps = width * freq * eff;
+    else {
+      err(`${path}.bandwidth`, 'give either bandwidth, or width and freq');
       bwBps = NaN;
     }
     positive(`${path}.bandwidth`, bwBps);
 
-    const payload = positive(
-      `${path}.maxPayload`,
-      opt('maxPayload', 'bytes') ?? { axi: 16 * (width ?? 16), noc: 64, pcie: 256, generic: mode === 'packet' ? 64 : Infinity }[protocol],
-    );
+    const payload = positive(fieldPath('maxPayload'), opt('maxPayload', 'bytes') ?? (mode === 'packet' ? 64 : Infinity));
     const pkt: CPacketParams = {
       payload,
-      readPayload: positive(`${path}.readPayload`, opt('readPayload', 'bytes') ?? payload),
-      // Only request/completion protocols limit request size; elsewhere a transaction is as
-      // large as the initiator's burst or the largest packet on its route.
-      maxRequest: positive(`${path}.maxRequest`, opt('maxRequest', 'bytes') ?? (protocol === 'pcie' ? 512 : Infinity)),
-      headerBytes: nonNeg(`${path}.header`, opt('header', 'bytes') ?? { axi: 0, noc: width ?? 16, pcie: 24, generic: 0 }[protocol]),
-      gapPs: sToPs(nonNeg(`${path}.packetGap`, opt('packetGap', 'time') ?? (protocol === 'axi' && freq ? 1 / freq : 0))),
-      policy: b.arbitration ?? 'round-robin',
-      cutThrough: (b.switching ?? (protocol === 'axi' || protocol === 'noc' ? 'cut-through' : 'store-and-forward')) === 'cut-through',
+      readPayload: positive(fieldPath('readPayload'), opt('readPayload', 'bytes') ?? payload),
+      // Unlimited unless set: then a transaction is the initiator's burst or the route's largest packet.
+      maxRequest: positive(fieldPath('maxRequest'), opt('maxRequest', 'bytes') ?? Infinity),
+      headerBytes: nonNeg(fieldPath('header'), opt('header', 'bytes') ?? 0),
+      gapPs: sToPs(nonNeg(fieldPath('packetGap'), opt('packetGap', 'time') ?? 0)),
+      policy: field('arbitration') ?? 'round-robin',
+      cutThrough: field('switching') === 'cut-through',
     };
-    const latPs = sToPs(nonNeg(`${path}.latency`, num(`${path}.latency`, b.latency, 'time', 0)));
-    const duplex = b.duplex ?? protocol !== 'generic';
+    const latPs = sToPs(nonNeg(fieldPath('latency'), opt('latency', 'time') ?? 0));
+    const duplex = field('duplex') ?? false;
+    const direction = field('direction') ?? 'initiator';
     const resRead = addRes(b.id, 'bus', duplex ? 'rd' : 'rw', bwBps);
     const resWrite = duplex ? addRes(b.id, 'bus', 'wr', bwBps) : resRead;
     if (mode === 'packet') {
@@ -409,7 +455,21 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
         });
       }
     }
-    return { idx, id: b.id, name: b.name || b.id, protocol, mode, bwBps, latPs, duplex, resRead, resWrite, pkt };
+    return {
+      idx,
+      id: b.id,
+      name: b.name || b.id,
+      type: type?.id ?? null,
+      typeName: type ? type.name || type.id : null,
+      mode,
+      direction,
+      bwBps,
+      latPs,
+      duplex,
+      resRead,
+      resWrite,
+      pkt,
+    };
   });
 
   const dmas: CDma[] = (model.dmas ?? []).map((d, idx) => {
@@ -442,13 +502,13 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
   for (const [id, info] of kinds) {
     if (info.kind === 'bus' && adj.get(id)!.size === 0) warn(`buses.${id}`, 'is not linked to anything');
   }
-  // A PCIe link is point to point; its two lanes are physical directions, not read/write.
+  // A point-to-point link's two lanes are physical directions, not read/write channels.
   const linkEnds = new Map<string, [string, string]>();
   for (const b of buses) {
-    if (b.protocol !== 'pcie' || !b.duplex) continue;
+    if (b.direction !== 'physical' || !b.duplex) continue;
     const ends = [...(adj.get(b.id) ?? [])].sort();
     if (ends.length !== 2) {
-      warn(`buses.${b.id}`, 'a PCIe link should connect exactly two components; lanes fall back to read/write');
+      warn(`buses.${b.id}`, 'a physical-direction link should connect exactly two components; its lanes fall back to read/write');
       continue;
     }
     linkEnds.set(b.id, [ends[0], ends[1]]);

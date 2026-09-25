@@ -1,3 +1,4 @@
+import { templateCopy } from '../model/busTypes';
 import type { Model } from '../model/types';
 
 /** A minimal model to learn the concepts: two periodic tasks sharing a CPU and DDR. */
@@ -246,7 +247,7 @@ export const pingpong: Model = {
 export const pcieCard: Model = {
   name: 'PCIe inference accelerator',
   description:
-    'A host feeds batches to an accelerator card over PCIe Gen4 x8. The device DMA pulls inputs from host memory with read requests of pcie_mrrs, returned as completions of pcie_completion bytes, the NPU runs from device DDR and SRAM, and results go back to the host. A 64 B doorbell from the host to the control CPU mailbox crosses the PCIe link, the NoC and the AXI control bus every 100 us with a 20 us deadline, contending with the bulk traffic packet by packet. Try pcie_completion = 64 B, or switch a bus to fluid to compare.',
+    'A host feeds batches to an accelerator card over PCIe Gen4 x8. The device DMA pulls inputs from host memory with read requests of pcie_mrrs, returned as completions of pcie_completion bytes, the NPU runs from device DDR and SRAM, and results go back to the host. A 64 B doorbell from the host to the control CPU mailbox crosses the PCIe link, the NoC and the AXI control bus every 100 us with a 20 us deadline, contending with the bulk traffic packet by packet. Try pcie_completion = 64 B, or switch a bus to fluid to compare. The PCIe, NoC and AXI buses use bus types defined in this model (Architecture → Bus types).',
   params: {
     batch: 16,
     npu_macs: 16384,
@@ -265,11 +266,22 @@ export const pcieCard: Model = {
     { id: 'dev_sram', name: 'Device SRAM', size: '8 MiB', bandwidth: '128 GB/s', readLatency: '5 ns', duplex: true },
     { id: 'mailbox', name: 'Mailbox SRAM', size: '64 KiB', bandwidth: '4 GB/s', readLatency: '10 ns' },
   ],
+  // The three interconnects are ordinary bus types in the model, copied from the templates;
+  // edit them in Architecture → Bus types, or define new ones.
+  busTypes: [templateCopy('pcie')!, templateCopy('noc')!, templateCopy('axi')!],
   buses: [
     { id: 'host_bus', name: 'Host fabric', bandwidth: '64 GB/s', latency: '50 ns', duplex: true },
-    { id: 'pcie', name: 'PCIe Gen4 x8', protocol: 'pcie', gen: 4, lanes: 8, latency: '300 ns', readPayload: 'pcie_completion', maxRequest: 'pcie_mrrs' },
-    { id: 'dev_noc', name: 'Device NoC', protocol: 'noc', width: '256 bit', freq: '1 GHz', latency: '20 ns' },
-    { id: 'dev_axi', name: 'Control AXI', protocol: 'axi', width: '32 bit', freq: '250 MHz', latency: '30 ns' },
+    {
+      id: 'pcie',
+      name: 'PCIe Gen4 x8',
+      type: 'pcie',
+      vars: { lanes: 8, lane_rate: '16 Gb/s' },
+      latency: '300 ns',
+      readPayload: 'pcie_completion',
+      maxRequest: 'pcie_mrrs',
+    },
+    { id: 'dev_noc', name: 'Device NoC', type: 'noc', width: '256 bit', freq: '1 GHz', latency: '20 ns' },
+    { id: 'dev_axi', name: 'Control AXI', type: 'axi', width: '32 bit', freq: '250 MHz', latency: '30 ns' },
   ],
   dmas: [{ id: 'dma', name: 'Device DMA', channels: 4, maxOutstanding: 32, burst: 4096, policy: 'priority' }],
   links: [

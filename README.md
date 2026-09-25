@@ -37,7 +37,7 @@ packet by packet), a two-task tutorial, and a tiled encoder with ping-pong DMA.
 | --- | --- | --- |
 | **Processor / HW block** | clock, cores, scheduling policy, preemptive, dispatch overhead, max outstanding + burst | Runs compute steps. Cores share one global ready queue. |
 | **Memory** | capacity, bandwidth, read/write latency, duplex | A bandwidth-limited endpoint. Duplex = independent read and write bandwidth. |
-| **Bus / interconnect** | protocol (generic, AXI, NoC, PCIe), model (fluid or packet), width × clock × efficiency (or PCIe gen × lanes, or bandwidth), hop latency, duplex, packet size, header, gap, arbitration, switching | A link simulated either as shared bandwidth (fluid) or packet by packet. Duplex = separate read and write channels (AXI), or the two directions of a PCIe link. |
+| **Bus / interconnect** | bus type, model (fluid or packet), width × clock × efficiency or a bandwidth expression, latency, lanes and lane direction, packet size, header, gap, arbitration, switching | A link simulated either as shared bandwidth (fluid) or packet by packet. Every field can come from a reusable **bus type** and be overridden per bus. |
 | **DMA engine** | channels, queueing policy, max outstanding + burst | Masters memory-to-memory transfers; requests beyond `channels` wait. |
 
 **Links** are undirected edges between components. A transfer is routed along the fewest bus hops;
@@ -69,8 +69,8 @@ memory latency, per leg. This is how a DMA with too few outstanding transactions
 
 ### Packet-level buses
 
-Set a bus's `model: packet` (the default for the AXI, NoC and PCIe protocols) and every transfer
-that crosses it is split into **transactions** and **packets**:
+Set a bus's `model: packet` and every transfer that crosses it is split into **transactions** and
+**packets**:
 
 - A transaction is the initiator's `burst`, clipped to the route's request limit (PCIe max read
   request size); the initiator keeps at most `maxOutstanding` transactions in flight. Throughput
@@ -88,17 +88,6 @@ that crosses it is split into **transactions** and **packets**:
 - Memories and fluid buses on the same route stay fluid: each transfer streams its packets through
   them as one flow, so bulk and packet traffic still share their bandwidth.
 
-| Protocol | Bandwidth | Defaults |
-| --- | --- | --- |
-| `axi` | width × clock × efficiency | payload = 16 beats × width, no header, 1-cycle gap per burst, cut-through, duplex R/W channels |
-| `noc` | width × clock × efficiency | 64 B packets, one header flit (= width), cut-through (wormhole), duplex |
-| `pcie` | lanes × GT/s × encoding (8b/10b, 128b/130b, or FLIT for Gen6) × 0.95 for DLLPs | 256 B max payload, completions of `readPayload` (default = max payload), 512 B max read request, 24 B per TLP (header + sequence + LCRC + framing), store-and-forward |
-
-A **PCIe** link must connect exactly two components; its lanes are the two **physical directions**
-("to X"), so a host's writes to the device and the device's reads of host memory share one lane,
-and the device's writes to the host use the other. AXI and NoC lanes are read and write channels
-relative to the initiator.
-
 **Packet trains.** To keep large DMAs fast, packets of one transaction move together as a train of
 up to `sim.maxTrainBytes` (default 4 KiB). Headers, gaps and bytes in flight stay exact, and trains
 pipeline through lanes the way their packets would. Transfers without an outstanding limit also merge
@@ -107,8 +96,38 @@ in service instead of one packet. Set `maxTrainBytes` to the packet size for exa
 arbitration. On the PCIe example, 4 KiB trains reproduce the per-packet batch latency to 0.01% with
 58× fewer events.
 
-Protocol headers and gaps also apply on fluid buses with a protocol set, as a bandwidth overhead, so
-switching a bus between fluid and packet keeps throughput comparable and changes only latency detail.
+Headers and gaps also apply on fluid buses, as a bandwidth overhead, so switching a bus between
+fluid and packet keeps throughput comparable and changes only latency detail.
+
+### Bus types
+
+Nothing about a particular interconnect is built into the simulator. A bus is a set of fields —
+`model`, `width`, `freq`, `efficiency`, `bandwidth`, `latency`, `duplex`, `direction`, `maxPayload`,
+`readPayload`, `maxRequest`, `header`, `packetGap`, `arbitration`, `switching` — and a **bus type**
+is a named set of defaults for them, kept in the model's `busTypes` list. A bus that sets
+`type: my_link` takes every field it leaves empty from the type and can override any of them.
+
+- A type can declare **variables** (`vars`), e.g. `lanes` and `lane_rate`; its expressions use
+  them, and each bus can override them (`vars: { lanes: 16 }`). Expressions can also use the bus's
+  own `width` and `freq`, so a type can say `maxPayload: 16 * width` or `packetGap: 1 / freq`.
+- `direction: physical` makes the two duplex lanes the physical directions of a point-to-point
+  link (it must connect exactly two components), so a host's writes to a device and the device's
+  reads of host memory share one lane. `direction: initiator` (the default) makes them read and
+  write channels relative to whoever masters the transfer, as on AXI or a NoC.
+- In the editor, **Architecture → Bus types** adds a type from a template or blank, and a bus's
+  **Save as new type** turns its current settings into a reusable type.
+
+Three templates ship as starting points; adding one copies it into the model, where it is ordinary data:
+
+| Template | Bandwidth | Settings |
+| --- | --- | --- |
+| AXI4 | width × freq | payload `16 * width`, no header, gap `1 / freq`, duplex read/write channels, cut-through |
+| NoC | width × freq | 64 B packets, header `width` (one flit), cut-through (wormhole), duplex |
+| PCIe | `lanes * lane_rate * encoding * link_efficiency` (vars: 8, 16 Gb/s, 128/130, 0.95) | 256 B payload and completions, 512 B max read request, 24 B per TLP, store-and-forward, physical direction |
+
+For another PCIe generation change `lane_rate` and `encoding` (Gen1 2.5 Gb/s and Gen2 5 Gb/s with
+8/10; Gen3 8, Gen4 16, Gen5 32 Gb/s with 128/130; Gen6 64 Gb/s at about 242/256). Models written
+with the older `protocol`, `gen` and `lanes` fields are converted to bus types when loaded.
 
 ### Scheduling
 
@@ -227,8 +246,8 @@ latency; packets pipeline back to back; cut-through beats store-and-forward by e
 serialization per extra hop; a small transfer behind bulk traffic waits for one packet under
 round-robin or priority but for the whole queue under FIFO; outstanding windows give Little's-law
 throughput; bulk throughput agrees with the fluid model; each lane counts headers at its own
-packet size; PCIe bandwidth follows generation × lanes × encoding; and PCIe directions map to the
-right physical lanes.
+packet size; physical-direction links map traffic to the right lanes; bus-type fields and variables
+resolve with bus overrides winning; and older protocol-based models convert correctly.
 
 ## Project layout
 

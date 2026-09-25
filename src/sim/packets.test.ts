@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { migrateBusTypes, templateCopy } from '../model/busTypes';
 import { compile } from '../model/compile';
 import type { BusSpec, Model, WorkplanSpec } from '../model/types';
 import type { SimResult } from './result';
@@ -191,9 +192,10 @@ describe('PCIe link direction', () => {
       ],
       buses: [
         { id: 'hbus', bandwidth: '100 GB/s', latency: '10 ns', duplex: true },
-        { id: 'pcie', protocol: 'pcie', gen: 4, lanes: 4, latency: '200 ns' },
+        { id: 'pcie', type: 'pcie', vars: { lanes: 4 }, latency: '200 ns' },
         { id: 'dbus', bandwidth: '100 GB/s', latency: '10 ns', duplex: true },
       ],
+      busTypes: [templateCopy('pcie')!],
       links: [
         ['host', 'hbus'],
         ['hmem', 'hbus'],
@@ -217,40 +219,85 @@ describe('PCIe link direction', () => {
   });
 });
 
-describe('protocol presets', () => {
-  it('derives PCIe bandwidth from generation and lanes', () => {
-    const c = compile(model([], { protocol: 'pcie', gen: 4, lanes: 8, bandwidth: undefined }));
+describe('bus types', () => {
+  const withType = (types: Model['busTypes'], link: Partial<BusSpec>): Model => ({ ...model([], link), busTypes: types });
+
+  it('computes PCIe bandwidth from the template\'s lane variables', () => {
+    const c = compile(withType([templateCopy('pcie')!], { type: 'pcie', bandwidth: undefined, maxPayload: undefined, header: undefined, model: undefined }));
     if (!c.ok) throw new Error(JSON.stringify(c.issues));
     const bus = c.model.buses[0];
-    // 8 lanes x 16 GT/s x 128/130 encoding / 8 bits, x 0.95 for DLLPs and flow control.
+    // 8 lanes x 16 Gb/s x 128/130 encoding, x 0.95 for DLLPs and flow control.
     expect(bus.bwBps).toBeCloseTo((8 * 16e9 * (128 / 130) * 0.95) / 8, 0);
     expect(bus.duplex).toBe(true);
+    expect(bus.direction).toBe('physical');
     expect(bus.pkt.cutThrough).toBe(false);
+    expect(bus.pkt.maxRequest).toBe(512);
+    expect(bus.typeName).toBe('PCIe');
   });
 
-  it('fills AXI and NoC defaults from the bus width', () => {
+  it('fills AXI and NoC defaults from each bus\'s own width and clock', () => {
     const c = compile({
       ...model([]),
+      busTypes: [templateCopy('axi')!, templateCopy('noc')!],
       buses: [
-        { id: 'axi', protocol: 'axi', width: '128 bit', freq: '1 GHz' },
-        { id: 'noc', protocol: 'noc', width: '256 bit', freq: '1 GHz' },
+        { id: 'axi', type: 'axi', width: '128 bit', freq: '1 GHz' },
+        { id: 'noc', type: 'noc', width: '256 bit', freq: '1 GHz' },
       ],
       links: [['a', 'axi'], ['axi', 'noc'], ['noc', 'b']],
     });
     if (!c.ok) throw new Error(JSON.stringify(c.issues));
     const [axi, noc] = c.model.buses;
     expect(axi.mode).toBe('packet');
-    expect(axi.pkt.payload).toBe(256); // 16 beats x 16 B
-    expect(axi.pkt.gapPs).toBe(1000); // one cycle between bursts
-    expect(noc.pkt.headerBytes).toBe(32); // one header flit
+    expect(axi.pkt.payload).toBe(256); // 16 x width
+    expect(axi.pkt.gapPs).toBe(1000); // 1 / freq
+    expect(noc.pkt.headerBytes).toBe(32); // one flit of the width
     expect(noc.pkt.cutThrough).toBe(true);
+  });
+
+  it('lets a bus override its type\'s fields and variables', () => {
+    const serdes = {
+      id: 'serdes',
+      name: 'Custom SerDes link',
+      vars: { lanes: 4, lane_rate: '25 Gb/s', coding: '64 / 66' },
+      bandwidth: 'lanes * lane_rate * coding',
+      model: 'packet' as const,
+      duplex: true,
+      direction: 'physical' as const,
+      maxPayload: '512 B',
+      header: '16 B',
+    };
+    const c = compile(withType([serdes], { type: 'serdes', bandwidth: undefined, maxPayload: undefined, header: '8 B', vars: { lanes: 2 } }));
+    if (!c.ok) throw new Error(JSON.stringify(c.issues));
+    const bus = c.model.buses[0];
+    expect(bus.bwBps).toBeCloseTo((2 * 25e9 * (64 / 66)) / 8, 0); // bus var wins
+    expect(bus.pkt.headerBytes).toBe(8); // bus field wins
+    expect(bus.pkt.payload).toBe(512); // inherited
+    expect(bus.direction).toBe('physical');
+  });
+
+  it('converts models written with protocol, gen and lanes', () => {
+    const old = model([], { protocol: 'pcie', gen: 3, lanes: 16, bandwidth: undefined, maxPayload: undefined, header: undefined, model: undefined });
+    const m = migrateBusTypes(structuredClone(old));
+    expect(m.buses[0].type).toBe('pcie');
+    expect(m.busTypes?.map((t) => t.id)).toEqual(['pcie']);
+    const c = compile(m);
+    if (!c.ok) throw new Error(JSON.stringify(c.issues));
+    expect(c.model.buses[0].bwBps).toBeCloseTo((16 * 8e9 * (128 / 130) * 0.95) / 8, 0);
+  });
+
+  it('explains unknown types and undefined names', () => {
+    const r1 = compile(withType([], { type: 'nope' }));
+    expect(!r1.ok && r1.issues.some((i) => i.path === 'buses.link.type' && i.message.includes('unknown bus type'))).toBe(true);
+    const r2 = compile(withType([templateCopy('axi')!], { type: 'axi', maxPayload: undefined }));
+    expect(!r2.ok && r2.issues.some((i) => i.message.includes('set width on this bus'))).toBe(true);
   });
 
   it('chops PCIe reads into completions of readPayload', () => {
     const read = (readPayload: number) => {
-      const m = model([
+      const m = withType([templateCopy('pcie')!], { type: 'pcie', vars: { lanes: 4 }, bandwidth: undefined, maxPayload: 256, readPayload, header: 24 });
+      m.workplans = [
         { id: 'rd', trigger: { type: 'times', times: ['0 ns'] }, steps: [{ id: 'x', kind: 'transfer', from: 'ddr', to: 'a', bytes: '256 KiB' }] },
-      ], { protocol: 'pcie', gen: 4, lanes: 4, bandwidth: undefined, maxPayload: 256, readPayload, header: 24 });
+      ];
       return resp(run(m), 'rd');
     };
     // 64 B completions carry 24 B of header each instead of per 256 B: slower.

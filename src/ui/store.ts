@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { adas } from '../examples';
+import { normalizeModel } from '../model/io';
 import type { Issue } from '../model/compile';
 import type { ComponentKind, Model } from '../model/types';
 import type { Analysis } from '../sim/analysis';
@@ -47,6 +48,9 @@ interface Store {
   select: (s: { kind: ComponentKind; id: string } | null) => void;
   selectedWp: string | null;
   selectWp: (id: string | null) => void;
+  /** Bus type open in the architecture inspector. */
+  selectedBusType: string | null;
+  selectBusType: (id: string | null) => void;
   focusJob: { wp: string; job: number } | null;
   setFocusJob: (f: { wp: string; job: number } | null) => void;
 
@@ -83,8 +87,19 @@ function save(key: string, value: unknown) {
 
 const HISTORY = 200;
 
+/** The autosaved model, brought up to date with the current schema; the example if none. */
+function loadModel(): Model {
+  try {
+    const saved = load<unknown>(MODEL_KEY, null);
+    if (saved) return normalizeModel(saved);
+  } catch {
+    /* an unreadable save falls back to the example */
+  }
+  return structuredClone(adas);
+}
+
 export const useStore = create<Store>((set, get) => ({
-  model: load<Model>(MODEL_KEY, structuredClone(adas)),
+  model: loadModel(),
   past: [],
   future: [],
   lastKey: null,
@@ -122,9 +137,11 @@ export const useStore = create<Store>((set, get) => ({
   view: 'architecture',
   setView: (view) => set({ view }),
   selection: null,
-  select: (selection) => set({ selection }),
+  select: (selection) => set({ selection, selectedBusType: selection ? null : get().selectedBusType }),
   selectedWp: null,
   selectWp: (selectedWp) => set({ selectedWp }),
+  selectedBusType: null,
+  selectBusType: (selectedBusType) => set({ selectedBusType, selection: selectedBusType ? null : get().selection }),
   focusJob: null,
   setFocusJob: (focusJob) => set({ focusJob }),
 

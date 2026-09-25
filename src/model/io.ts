@@ -1,4 +1,5 @@
 import YAML from 'yaml';
+import { migrateBusTypes } from './busTypes';
 import type { Model } from './types';
 
 /** Fills in missing collections so partially written files still load. */
@@ -18,19 +19,20 @@ export function normalizeModel(raw: unknown): Model {
     }
     throw new Error(`links[${i}] must be a pair like [cpu, axi] or "cpu -- axi"`);
   });
-  return {
+  return migrateBusTypes({
     name: m.name ?? 'Untitled model',
     description: m.description,
     params: m.params ?? {},
     processors: arr(m.processors, 'processors'),
     memories: arr(m.memories, 'memories'),
+    busTypes: arr(m.busTypes, 'busTypes'),
     buses: arr(m.buses, 'buses'),
     dmas: arr(m.dmas, 'dmas'),
     links,
     workplans: arr(m.workplans, 'workplans').map((w) => ({ ...w, steps: arr(w.steps, `workplans.${w.id}.steps`) })),
     sim: m.sim ?? { duration: '100 ms', seed: 1 },
     layout: m.layout,
-  };
+  });
 }
 
 export function toYaml(m: Model, { withLayout = true } = {}): string {
