@@ -183,3 +183,8 @@ src/views/     Architecture, Workplans, Parameters, Source, Requirements, Result
 src/ui/        store (zustand, undo/redo, autosave), charts, form components, worker client
 src/examples/  example models
 ```
+
+## License
+
+Copyright 2026 revelationnow. Licensed under the [Apache License, Version 2.0](LICENSE).
+If you redistribute RTSim or work derived from it, keep the [`NOTICE`](NOTICE) file with it.

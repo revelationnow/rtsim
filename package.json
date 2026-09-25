@@ -3,6 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "description": "Discrete-event simulator for scoping real-time hardware: processors, buses, memories, DMA and task workplans.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/revelationnow/rtsim.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
