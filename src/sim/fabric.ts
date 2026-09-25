@@ -13,7 +13,11 @@ export interface Flow {
   remaining: number;
   total: number;
   rate: number;
-  onDone: () => void;
+  /**
+   * Called when the flow's bytes are done. Returning a positive byte count refills the flow in
+   * place (a stream of packets), which keeps the allocation unchanged and avoids re-solving it.
+   */
+  onDone: () => number | void;
 }
 
 /**
@@ -28,6 +32,7 @@ export class Fabric {
   private lastT = 0;
   private next: SimEvent | null = null;
   private deferDepth = 0;
+  private membershipChanged = false;
   /** Bytes/ps currently consumed on each resource. */
   private readonly load: Float64Array;
   readonly series: StepSeries[];
@@ -66,6 +71,7 @@ export class Fabric {
   }
 
   private changed(): void {
+    this.membershipChanged = true;
     if (this.deferDepth > 0) return;
     this.reallocate();
     this.scheduleNext();
@@ -132,19 +138,27 @@ export class Fabric {
     this.next = null;
     this.advance(this.q.now);
     const done: Flow[] = [];
-    this.flows = this.flows.filter((f) => {
-      const finished = f.remaining <= Math.max(1e-6, f.total * 1e-12) || (f.rate > 0 && f.remaining / f.rate < 0.5);
-      if (finished) done.push(f);
-      return !finished;
-    });
+    for (const f of this.flows) {
+      if (f.remaining <= Math.max(1e-6, f.total * 1e-12) || (f.rate > 0 && f.remaining / f.rate < 0.5)) done.push(f);
+    }
     // Completions can start new transfers; batch them into one reallocation.
+    const before = this.flows.length;
+    this.membershipChanged = false;
     this.deferDepth++;
+    const ended = new Set<Flow>();
     try {
-      for (const f of done) f.onDone();
+      for (const f of done) {
+        const more = f.onDone();
+        if (typeof more === 'number' && more > 0) {
+          f.remaining = more;
+          f.total = more;
+        } else ended.add(f);
+      }
     } finally {
       this.deferDepth--;
     }
-    this.reallocate();
+    if (ended.size) this.flows = this.flows.filter((f) => !ended.has(f));
+    if (ended.size || this.membershipChanged || this.flows.length !== before) this.reallocate();
     this.scheduleNext();
   }
 

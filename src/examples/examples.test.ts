@@ -27,6 +27,6 @@ describe('examples', () => {
         console.log(r.warnings);
       }
       expect(r.workplans.every((w) => w.completed > 0)).toBe(true);
-    });
+    }, 60_000);
   }
 });

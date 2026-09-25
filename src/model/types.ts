@@ -38,20 +38,48 @@ export interface MemorySpec {
   duplex?: boolean;
 }
 
+export type BusProtocol = 'generic' | 'axi' | 'noc' | 'pcie';
+
 export interface BusSpec {
   id: string;
   name?: string;
+  /**
+   * 'fluid': transfers share bandwidth as continuous flows (fast, average behaviour).
+   * 'packet': transfers are split into packets that are arbitrated and served one at a time,
+   * each paying serialization and hop latency. Defaults to 'packet' for the AXI, NoC and PCIe
+   * protocols and 'fluid' otherwise.
+   */
+  model?: 'fluid' | 'packet';
+  /** Fills in packet-size, header, arbitration and switching defaults for that protocol. */
+  protocol?: BusProtocol;
   /** Data-path width, e.g. "128 bit" or 16. Used with freq when bandwidth is not given. */
   width?: Expr;
   freq?: Expr;
-  /** Fraction of the raw width x freq that is achievable (protocol overhead). */
+  /** Fraction of the raw bandwidth that is achievable (protocol overhead not modelled per packet). */
   efficiency?: Expr;
-  /** Overrides width x freq x efficiency when set. */
+  /** Overrides width x freq x efficiency (or PCIe gen x lanes) when set. */
   bandwidth?: Expr;
-  /** Latency added per traversal (arbitration + pipeline stages). */
+  /** PCIe generation (1–6) and link width, used for bandwidth when it is not given. */
+  gen?: number;
+  lanes?: number;
+  /** Latency added per traversal (arbitration + pipeline stages); per packet in packet mode. */
   latency?: Expr;
-  /** Separate read and write data channels, as on AXI. */
+  /** Separate read and write data channels, as on AXI. Defaults on for AXI, NoC and PCIe. */
   duplex?: boolean;
+  /** Largest data payload per packet (AXI burst, NoC packet, PCIe max payload size). */
+  maxPayload?: Expr;
+  /** Payload per packet for data flowing back to a reader (PCIe completions); defaults to maxPayload. */
+  readPayload?: Expr;
+  /** Bytes per request (PCIe max read request size, default 512 B); unlimited for other protocols. */
+  maxRequest?: Expr;
+  /** Overhead bytes serialized with every packet (header flit, TLP header + framing + CRC). */
+  header?: Expr;
+  /** Idle time on the link between packets (arbitration bubble, handshake). */
+  packetGap?: Expr;
+  /** Packet mode: how waiting packets are picked. 'round-robin' rotates between initiators. */
+  arbitration?: 'round-robin' | 'priority' | 'fifo';
+  /** Packet mode: 'cut-through' forwards a packet once its header arrives (wormhole). */
+  switching?: 'store-and-forward' | 'cut-through';
 }
 
 export interface DmaSpec {
@@ -152,6 +180,12 @@ export interface SimSettings {
   utilWindow?: Expr;
   /** Cap on recorded timeline segments; statistics are always complete. */
   traceLimit?: number;
+  /**
+   * Packet-mode transfers move in trains of consecutive packets up to this size (default 4 KiB):
+   * headers, gaps and bytes in flight are exact, but other traffic waits for the train in service
+   * rather than a single packet. Set it to the packet size for exact per-packet arbitration.
+   */
+  maxTrainBytes?: Expr;
   /**
    * How contending transfers share a link. 'priority': higher-priority transfers are served
    * first (strict QoS), equal priorities share max-min fairly by weight. 'fair': priorities

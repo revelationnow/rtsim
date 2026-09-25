@@ -4,6 +4,7 @@ import { hashString, Rng } from '../model/rng';
 import type { Model } from '../model/types';
 import { Fabric } from './fabric';
 import { EventQueue } from './heap';
+import { PacketNet } from './packets';
 import { DmaSim, ProcessorSim, type Task } from './resources';
 import type {
   FootprintResult,
@@ -126,6 +127,7 @@ export function simulate(cm: CompiledModel, opts: SimOptions = {}): SimResult {
     cm.arbitration === 'fair',
     seriesLimit,
   );
+  const net = new PacketNet(cm.packetLanes, q, fabric, cm.trainBytes, seriesLimit);
   const procs = cm.processors.map((p) => new ProcessorSim(p, q, seriesLimit));
   const dmas = cm.dmas.map((d) => new DmaSim(d, q, seriesLimit));
   const footprint = cm.memories.map(() => new StepSeries(seriesLimit));
@@ -318,6 +320,18 @@ export function simulate(cm: CompiledModel, opts: SimOptions = {}): SimResult {
         if (path.dstMem >= 0 && bytes > 0) {
           si.alloc = bytes;
           allocate(path.dstMem, bytes);
+        }
+        if (path.packet) {
+          net.transfer({
+            plan: path.packet,
+            bytes,
+            prio: def.priority,
+            weight: def.weight,
+            master: path.initiator,
+            onFirstData: () => (si.streamT = q.now),
+            onDone: finish,
+          });
+          return;
         }
         q.after(path.latencyPs, () => {
           si.streamT = q.now;
@@ -632,14 +646,46 @@ export function simulate(cm: CompiledModel, opts: SimOptions = {}): SimResult {
     });
   });
   cm.resources.forEach((r, i) => {
-    const s = fabric.series[i];
     const owner =
       r.ownerKind === 'memory' ? cm.memories[cm.kinds.get(r.owner)!.idx].name : cm.buses[cm.kinds.get(r.owner)!.idx].name;
+    const name = r.lane === 'rw' ? owner : `${owner} (${r.label ?? (r.lane === 'rd' ? 'read' : 'write')})`;
+    const lane = r.packet >= 0 ? net.lanes[r.packet] : null;
+    if (lane) {
+      // A packet lane is busy while serializing headers, payload and gaps.
+      resources.push({
+        id: r.id,
+        name,
+        kind: 'bus',
+        lane: r.lane,
+        mode: 'packet',
+        capacity: r.capBps,
+        utilization: end > 0 ? lane.busy.integral(end) / end : 0,
+        peakWindowUtil: peak(lane.busy),
+        bytes: lane.payloadBytes + lane.overheadBytes,
+        throughput: end > 0 ? lane.payloadBytes / (end / PS_PER_S) : 0,
+        series: pack(lane.busy),
+        queue: {
+          t: statsOnly ? [] : lane.queue.t,
+          v: statsOnly ? [] : lane.queue.v,
+          mean: end > 0 ? lane.queue.integral(end) / end : 0,
+          max: lane.queue.peak(end),
+        },
+        extra: {
+          packets: lane.packets,
+          meanWaitPs: lane.served ? lane.waitSum / lane.served : 0,
+          maxWaitPs: lane.waitMax,
+          overhead: lane.payloadBytes + lane.overheadBytes > 0 ? lane.overheadBytes / (lane.payloadBytes + lane.overheadBytes) : 0,
+        },
+      });
+      return;
+    }
+    const s = fabric.series[i];
     resources.push({
       id: r.id,
-      name: r.lane === 'rw' ? owner : `${owner} (${r.lane === 'rd' ? 'read' : 'write'})`,
+      name,
       kind: r.ownerKind,
       lane: r.lane,
+      mode: 'fluid',
       capacity: r.capBps,
       utilization: end > 0 ? fabric.bytes[i] / ((r.capBps / PS_PER_S) * end) : 0,
       peakWindowUtil: peak(s),

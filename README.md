@@ -23,8 +23,9 @@ npm run build      # static site in dist/
 SINGLE_FILE=1 npm run build   # one self-contained HTML file in dist-single/
 ```
 
-Models autosave in the browser and can be saved/opened as YAML or JSON. Three examples ship with the
-app: an ADAS camera + radar fusion SoC, a two-task tutorial, and a tiled encoder with ping-pong DMA.
+Models autosave in the browser and can be saved/opened as YAML or JSON. Four examples ship with the
+app: an ADAS camera + radar fusion SoC, a PCIe inference accelerator (PCIe, NoC and AXI simulated
+packet by packet), a two-task tutorial, and a tiled encoder with ping-pong DMA.
 
 ---
 
@@ -36,7 +37,7 @@ app: an ADAS camera + radar fusion SoC, a two-task tutorial, and a tiled encoder
 | --- | --- | --- |
 | **Processor / HW block** | clock, cores, scheduling policy, preemptive, dispatch overhead, max outstanding + burst | Runs compute steps. Cores share one global ready queue. |
 | **Memory** | capacity, bandwidth, read/write latency, duplex | A bandwidth-limited endpoint. Duplex = independent read and write bandwidth. |
-| **Bus / interconnect** | width × clock × efficiency (or bandwidth), hop latency, duplex | A bandwidth-limited link. Duplex = separate read and write channels (AXI). |
+| **Bus / interconnect** | protocol (generic, AXI, NoC, PCIe), model (fluid or packet), width × clock × efficiency (or PCIe gen × lanes, or bandwidth), hop latency, duplex, packet size, header, gap, arbitration, switching | A link simulated either as shared bandwidth (fluid) or packet by packet. Duplex = separate read and write channels (AXI), or the two directions of a PCIe link. |
 | **DMA engine** | channels, queueing policy, max outstanding + burst | Masters memory-to-memory transfers; requests beyond `channels` wait. |
 
 **Links** are undirected edges between components. A transfer is routed along the fewest bus hops;
@@ -53,8 +54,10 @@ endpoint, else the model's only DMA. Data flows **source → initiator → desti
 - on a shared (non-duplex) bus both legs consume the same capacity, so a DMA copy across one bus
   costs twice its size in bus bandwidth — as it does in hardware.
 
-Transfer time = **fixed latency + bytes / rate**. The latency is the source memory's read latency plus
-every hop's latency plus the destination's write latency. The **rate** comes from a *fluid* (flow-level)
+Each bus is simulated one of two ways, chosen per bus (see [Packet-level buses](#packet-level-buses)).
+On **fluid** buses, transfer time = **fixed latency + bytes / rate**. The latency is a read's request
+trip across the read leg, the source memory's read latency, every hop's latency on the way back and
+forward, and the destination's write latency. The **rate** comes from a *fluid* (flow-level)
 model: all transfers streaming at a given moment share each resource by **weighted max-min fairness**
 (progressive filling), served in **strict priority classes** when `sim.arbitration: priority` (the
 default) or ignoring priority when `fair`. Rates are recomputed only when a transfer starts or ends,
@@ -63,6 +66,49 @@ so large transfers are cheap to simulate while contention is still accounted exa
 If the initiator declares `maxOutstanding` and `burst`, its rate is also capped by Little's law:
 `outstanding × burst / round-trip latency`, where the round trip is twice the hop latency plus the
 memory latency, per leg. This is how a DMA with too few outstanding transactions under-uses a fast bus.
+
+### Packet-level buses
+
+Set a bus's `model: packet` (the default for the AXI, NoC and PCIe protocols) and every transfer
+that crosses it is split into **transactions** and **packets**:
+
+- A transaction is the initiator's `burst`, clipped to the route's request limit (PCIe max read
+  request size); the initiator keeps at most `maxOutstanding` transactions in flight. Throughput
+  limited by round trips (Little's law) emerges from this rather than being imposed.
+- A read transaction first pays the request trip to the source and the memory's read latency; its
+  data then flows back as packets.
+- At each packet-mode lane a packet **queues**, wins **arbitration**, then occupies the lane for
+  `(payload + header) / bandwidth + gap`, and reaches the next hop after the lane's latency.
+  Store-and-forward lanes pass the packet on once it has fully arrived; cut-through (wormhole)
+  lanes pass the head on after the header, and the tail follows.
+- Each lane packetizes at **its own payload size**: a transfer that crosses a PCIe link with 256 B
+  payloads and a NoC with 64 B packets pays TLP headers every 256 B and flit headers every 64 B.
+- **Arbitration:** `round-robin` (deficit round-robin between initiators, byte-fair), `priority`
+  (higher step priority first) or `fifo`.
+- Memories and fluid buses on the same route stay fluid: each transfer streams its packets through
+  them as one flow, so bulk and packet traffic still share their bandwidth.
+
+| Protocol | Bandwidth | Defaults |
+| --- | --- | --- |
+| `axi` | width × clock × efficiency | payload = 16 beats × width, no header, 1-cycle gap per burst, cut-through, duplex R/W channels |
+| `noc` | width × clock × efficiency | 64 B packets, one header flit (= width), cut-through (wormhole), duplex |
+| `pcie` | lanes × GT/s × encoding (8b/10b, 128b/130b, or FLIT for Gen6) × 0.95 for DLLPs | 256 B max payload, completions of `readPayload` (default = max payload), 512 B max read request, 24 B per TLP (header + sequence + LCRC + framing), store-and-forward |
+
+A **PCIe** link must connect exactly two components; its lanes are the two **physical directions**
+("to X"), so a host's writes to the device and the device's reads of host memory share one lane,
+and the device's writes to the host use the other. AXI and NoC lanes are read and write channels
+relative to the initiator.
+
+**Packet trains.** To keep large DMAs fast, packets of one transaction move together as a train of
+up to `sim.maxTrainBytes` (default 4 KiB). Headers, gaps and bytes in flight stay exact, and trains
+pipeline through lanes the way their packets would. Transfers without an outstanding limit also merge
+whole transactions into trains. The cost is arbitration granularity: other traffic waits for the train
+in service instead of one packet. Set `maxTrainBytes` to the packet size for exact per-packet
+arbitration. On the PCIe example, 4 KiB trains reproduce the per-packet batch latency to 0.01% with
+58× fewer events.
+
+Protocol headers and gaps also apply on fluid buses with a protocol set, as a bandwidth overhead, so
+switching a bus between fluid and packet keeps throughput comparable and changes only latency detail.
 
 ### Scheduling
 
@@ -150,10 +196,14 @@ a post-processing step.
 
 RTSim is for early architecture scoping; it trades cycle accuracy for speed and clarity.
 
-- Interconnect contention is modeled at flow level (fair or priority bandwidth sharing), not per
-  burst. There is no DRAM bank/page/refresh model, no caches, no coherency traffic; fold those into
-  memory bandwidth, efficiency and latency figures.
-- A transfer's latency is paid once, up front; bandwidth is consumed while streaming.
+- Fluid buses share bandwidth at flow level; packet buses arbitrate and serialize packets. Neither
+  models finite buffers or backpressure: queues at a lane are unbounded. There is no DRAM
+  bank/page/refresh model, no caches, no coherency traffic; fold those into memory bandwidth,
+  efficiency and latency figures.
+- On fluid buses a transfer's latency is paid once, up front; bandwidth is consumed while streaming.
+- Read requests on packet buses cost latency but no link bandwidth; write responses are not modeled
+  (an initiator's transaction slot frees when its last packet lands).
+- Memories stay fluid even on packet routes.
 - Processor-initiated transfers do not occupy a core. Model a CPU `memcpy` as a transfer plus a
   compute step if the core time matters. A memory-bound compute can be modeled as a compute step and a
   transfer that run in parallel between the same dependencies.
@@ -171,6 +221,14 @@ queueing; fixed-priority preemptive response times against classic response-time
 rate-monotonic misses; fork-join DAGs on multiple cores; joins, decimation, overrun handling;
 Poisson inter-arrival statistics; the solver against an analytic bandwidth requirement; and
 the static analysis against rate × size.
+
+Packet mode is checked the same way: one packet costs header + payload serialization plus hop
+latency; packets pipeline back to back; cut-through beats store-and-forward by exactly one
+serialization per extra hop; a small transfer behind bulk traffic waits for one packet under
+round-robin or priority but for the whole queue under FIFO; outstanding windows give Little's-law
+throughput; bulk throughput agrees with the fluid model; each lane counts headers at its own
+packet size; PCIe bandwidth follows generation × lanes × encoding; and PCIe directions map to the
+right physical lanes.
 
 ## Project layout
 

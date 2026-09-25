@@ -358,17 +358,18 @@ function ResourcesCard({ r }: { r: SimResult }) {
                 <th>Resource</th>
                 <th>Average utilization</th>
                 <th className="r">Peak window</th>
-                <th className="w-[34%]">Over time</th>
+                <th className="w-[24%]">Over time</th>
                 <th className="r">Throughput / queue</th>
               </tr>
             </thead>
             <tbody>
               {r.resources.map((x) => (
                 <tr key={x.id} className={`hover ${focus === x.id ? 'sel' : ''}`} onClick={() => setFocus(focus === x.id ? null : x.id)}>
-                  <td>
+                  <td className="whitespace-nowrap">
                     <div className="font-medium">{x.name}</div>
                     <div className="text-[11px] text-muted">
-                      {x.kind} · {x.kind === 'processor' ? `${x.capacity} core${x.capacity > 1 ? 's' : ''}` : x.kind === 'dma' ? `${x.capacity} ch` : fmtRate(x.capacity)}
+                      {x.kind}
+                      {x.mode === 'packet' ? ' (packet level)' : ''} · {x.kind === 'processor' ? `${x.capacity} core${x.capacity > 1 ? 's' : ''}` : x.kind === 'dma' ? `${x.capacity} ch` : fmtRate(x.capacity)}
                     </div>
                   </td>
                   <td>
@@ -378,8 +379,15 @@ function ResourcesCard({ r }: { r: SimResult }) {
                   <td>
                     <Spark res={x} end={r.durationPs} />
                   </td>
-                  <td className="r text-ink-2">
-                    {x.kind === 'bus' || x.kind === 'memory'
+                  <td className="min-w-[230px] text-right text-ink-2">
+                    {x.mode === 'packet' && x.extra ? (
+                      <>
+                        <div>{fmtRate(x.throughput)} payload</div>
+                        <div className="text-[11px]">
+                          wait/packet avg {fmtTime(x.extra.meanWaitPs)}, max {fmtTime(x.extra.maxWaitPs)} · {fmtPct(x.extra.overhead)} headers
+                        </div>
+                      </>
+                    ) : x.kind === 'bus' || x.kind === 'memory'
                       ? fmtRate(x.throughput)
                       : x.queue
                         ? `queue avg ${fmtNum(x.queue.mean, 2)}, max ${x.queue.max}`

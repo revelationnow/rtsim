@@ -160,6 +160,21 @@ export function ParamsView() {
               }
             />
           </Field>
+          <Field label="Packet trains" hint="Packet-level transfers move in trains of consecutive packets up to this size. Headers, gaps and bytes in flight stay exact; other traffic waits for the train in service. Set it to the packet size for exact per-packet arbitration.">
+            <ExprField
+              value={model.sim.maxTrainBytes}
+              kind="bytes"
+              scope={scope}
+              optional
+              placeholder="4 KiB"
+              onChange={(v) =>
+                update((m) => {
+                  if (v === undefined || v === '') delete m.sim.maxTrainBytes;
+                  else m.sim.maxTrainBytes = v;
+                }, 'sim.train')
+              }
+            />
+          </Field>
           <Field label="Timeline limit" hint="Segments recorded for the timeline; statistics are always complete">
             <input
               className="ctl num"

@@ -239,8 +239,102 @@ export const pingpong: Model = {
   sim: { duration: '200 ms', seed: 3 },
 };
 
+/**
+ * A PCIe inference card: host memory over a PCIe link, a device NoC and an AXI control bus, all
+ * simulated packet by packet. Bulk DMA shares the link and NoC with a latency-critical doorbell.
+ */
+export const pcieCard: Model = {
+  name: 'PCIe inference accelerator',
+  description:
+    'A host feeds batches to an accelerator card over PCIe Gen4 x8. The device DMA pulls inputs from host memory with read requests of pcie_mrrs, returned as completions of pcie_completion bytes, the NPU runs from device DDR and SRAM, and results go back to the host. A 64 B doorbell from the host to the control CPU mailbox crosses the PCIe link, the NoC and the AXI control bus every 100 us with a 20 us deadline, contending with the bulk traffic packet by packet. Try pcie_completion = 64 B, or switch a bus to fluid to compare.',
+  params: {
+    batch: 16,
+    npu_macs: 16384,
+    dev_ddr_bw: '25.6 GB/s',
+    pcie_completion: '128 B',
+    pcie_mrrs: '4 KiB',
+  },
+  processors: [
+    { id: 'host_cpu', name: 'Host CPU', freq: '3 GHz', cores: 8, policy: 'fixed-priority', preemptive: true, contextSwitch: '1 us', maxOutstanding: 16, burst: 64 },
+    { id: 'npu', name: 'NPU', freq: '1.2 GHz', cores: 1, policy: 'fifo', maxOutstanding: 16, burst: 4096 },
+    { id: 'ctrl_cpu', name: 'Control CPU', freq: '800 MHz', cores: 1, policy: 'fixed-priority', preemptive: true, contextSwitch: '400 ns', maxOutstanding: 4, burst: 64 },
+  ],
+  memories: [
+    { id: 'host_ddr', name: 'Host DDR5', size: '64 GiB', bandwidth: '51.2 GB/s', readLatency: '90 ns', writeLatency: '70 ns' },
+    { id: 'dev_ddr', name: 'Device LPDDR5', size: '16 GiB', bandwidth: 'dev_ddr_bw', readLatency: '110 ns', writeLatency: '90 ns' },
+    { id: 'dev_sram', name: 'Device SRAM', size: '8 MiB', bandwidth: '128 GB/s', readLatency: '5 ns', duplex: true },
+    { id: 'mailbox', name: 'Mailbox SRAM', size: '64 KiB', bandwidth: '4 GB/s', readLatency: '10 ns' },
+  ],
+  buses: [
+    { id: 'host_bus', name: 'Host fabric', bandwidth: '64 GB/s', latency: '50 ns', duplex: true },
+    { id: 'pcie', name: 'PCIe Gen4 x8', protocol: 'pcie', gen: 4, lanes: 8, latency: '300 ns', readPayload: 'pcie_completion', maxRequest: 'pcie_mrrs' },
+    { id: 'dev_noc', name: 'Device NoC', protocol: 'noc', width: '256 bit', freq: '1 GHz', latency: '20 ns' },
+    { id: 'dev_axi', name: 'Control AXI', protocol: 'axi', width: '32 bit', freq: '250 MHz', latency: '30 ns' },
+  ],
+  dmas: [{ id: 'dma', name: 'Device DMA', channels: 4, maxOutstanding: 32, burst: 4096, policy: 'priority' }],
+  links: [
+    ['host_cpu', 'host_bus'],
+    ['host_ddr', 'host_bus'],
+    ['host_bus', 'pcie'],
+    ['pcie', 'dev_noc'],
+    ['dev_noc', 'dev_ddr'],
+    ['dev_noc', 'dev_sram'],
+    ['dev_noc', 'npu'],
+    ['dev_noc', 'dma'],
+    ['dev_noc', 'dev_axi'],
+    ['dev_axi', 'ctrl_cpu'],
+    ['dev_axi', 'mailbox'],
+  ],
+  workplans: [
+    {
+      id: 'infer',
+      name: 'Batch inference',
+      priority: 5,
+      deadline: '10 ms',
+      maxInFlight: 2,
+      onOverrun: 'queue',
+      trigger: { type: 'periodic', period: '10 ms' },
+      steps: [
+        { id: 'h2d', kind: 'transfer', from: 'host_ddr', to: 'dev_ddr', via: 'dma', bytes: 'batch * 1920 * 1080 * 1.5 B' },
+        { id: 'weights', kind: 'transfer', from: 'dev_ddr', to: 'npu', bytes: '24 MiB' },
+        { id: 'compute', kind: 'compute', on: 'npu', cycles: 'batch * 4.1e9 / npu_macs / 0.6', after: ['h2d', 'weights'] },
+        { id: 'spill', kind: 'transfer', from: 'npu', to: 'dev_sram', bytes: 'batch * 2 MiB', after: ['h2d', 'weights'] },
+        { id: 'd2h', kind: 'transfer', from: 'dev_sram', to: 'host_ddr', via: 'dma', bytes: 'batch * 4 KiB', after: ['compute', 'spill'] },
+      ],
+    },
+    {
+      id: 'doorbell',
+      name: 'Doorbell to control CPU',
+      priority: 9,
+      deadline: '20 us',
+      trigger: { type: 'periodic', period: '100 us', offset: '7 us' },
+      steps: [
+        { id: 'ring', kind: 'transfer', from: 'host_cpu', to: 'mailbox', bytes: '64 B' },
+        { id: 'handle', kind: 'compute', on: 'ctrl_cpu', cycles: 2000, after: ['ring'] },
+        { id: 'ack', kind: 'transfer', from: 'ctrl_cpu', to: 'host_ddr', bytes: '16 B', after: ['handle'] },
+      ],
+    },
+    {
+      id: 'telemetry',
+      name: 'Telemetry reads',
+      priority: 1,
+      trigger: { type: 'poisson', interval: '1 ms' },
+      steps: [{ id: 'rd', kind: 'transfer', from: 'dev_ddr', to: 'ctrl_cpu', bytes: '4 KiB' }],
+    },
+    {
+      id: 'host_bg',
+      name: 'Host background traffic',
+      priority: 0,
+      trigger: { type: 'poisson', interval: '50 us' },
+      steps: [{ id: 'copy', kind: 'transfer', from: 'host_ddr', to: 'host_cpu', bytes: 'exponential(64 KiB)' }],
+    },
+  ],
+  sim: { duration: '100 ms', seed: 11 },
+};
+
 export const EXAMPLES: { key: string; model: Model }[] = [
   { key: 'adas', model: adas },
+  { key: 'pcie', model: pcieCard },
   { key: 'tutorial', model: tutorial },
   { key: 'pingpong', model: pingpong },
 ];

@@ -73,6 +73,8 @@ export interface ResourceResult {
   name: string;
   kind: 'processor' | 'memory' | 'bus' | 'dma';
   lane: 'rw' | 'rd' | 'wr' | 'cores' | 'channels';
+  /** How a bus or memory lane was simulated. */
+  mode?: 'fluid' | 'packet';
   /** Bytes/s for memory and bus lanes; cores or channels otherwise. */
   capacity: number;
   utilization: number;

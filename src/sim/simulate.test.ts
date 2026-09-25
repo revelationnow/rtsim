@@ -47,8 +47,9 @@ const res = (r: SimResult, id: string) => r.resources.find((x) => x.id === id)!;
 describe('transfers', () => {
   it('costs latency plus bytes over the bottleneck bandwidth', () => {
     const r = run(base([once('a', [{ id: 'rd', kind: 'transfer', from: 'ddr', to: 'cpu', bytes: '1 MB' }])]));
-    // 100 ns DDR + 10 ns hop, then 1e6 B at min(10, 16) GB/s = 100 us.
-    expect(wp(r, 'a').response.max).toBe(110 * NS + 100 * US);
+    // A read is a round trip: 10 ns request hop + 100 ns DDR + 10 ns data hop, then
+    // 1e6 B at min(10, 16) GB/s = 100 us.
+    expect(wp(r, 'a').response.max).toBe(120 * NS + 100 * US);
     expect(res(r, 'ddr').bytes).toBeCloseTo(1e6, 3);
   });
 
@@ -60,8 +61,8 @@ describe('transfers', () => {
       ]),
     );
     // Both stream at 5 GB/s through the DDR bottleneck.
-    expect(wp(r, 'a').response.max).toBe(110 * NS + 200 * US);
-    expect(wp(r, 'b').response.max).toBe(110 * NS + 200 * US);
+    expect(wp(r, 'a').response.max).toBe(120 * NS + 200 * US);
+    expect(wp(r, 'b').response.max).toBe(120 * NS + 200 * US);
   });
 
   it('serves the higher-priority stream first under priority arbitration', () => {
@@ -71,8 +72,8 @@ describe('transfers', () => {
         once('lo', [{ id: 'x', kind: 'transfer', from: 'ddr', to: 'cpu', bytes: '1 MB' }], { priority: 1 }),
       ]),
     );
-    expect(wp(r, 'hi').response.max).toBe(110 * NS + 100 * US);
-    expect(wp(r, 'lo').response.max).toBe(110 * NS + 200 * US);
+    expect(wp(r, 'hi').response.max).toBe(120 * NS + 100 * US);
+    expect(wp(r, 'lo').response.max).toBe(120 * NS + 200 * US);
   });
 
   it('ignores priorities with fair arbitration', () => {
@@ -96,8 +97,8 @@ describe('transfers', () => {
       ]),
     );
     // Shared at 5 GB/s until small finishes at 100 us; big then has 0.5 MB left at 10 GB/s.
-    expect(wp(r, 'small').response.max).toBe(110 * NS + 100 * US);
-    expect(wp(r, 'big').response.max).toBe(110 * NS + 150 * US);
+    expect(wp(r, 'small').response.max).toBe(120 * NS + 100 * US);
+    expect(wp(r, 'big').response.max).toBe(120 * NS + 150 * US);
   });
 
   it('gives an unconstrained stream the capacity a capped one leaves over', () => {
@@ -115,24 +116,24 @@ describe('transfers', () => {
     // leaving 4 - 2.1333 = 1.8667 GB/s for the free stream while the capped one runs.
     const cap = (2 * 64) / 120e-9;
     const cappedStream = 0.2e6 / cap;
-    // Latency: 100 ns DDR + 10 ns read hop + 10 ns write hop + 0 ns SRAM.
-    expect(wp(r, 'capped').response.max / MS).toBeCloseTo((120 * NS + cappedStream * 1e12) / MS, 6);
+    // Latency: 10 ns request hop + 100 ns DDR + 10 ns read hop + 10 ns write hop + 0 ns SRAM.
+    expect(wp(r, 'capped').response.max / MS).toBeCloseTo((130 * NS + cappedStream * 1e12) / MS, 6);
     const freeLeft = 1e6 - (4e9 - 2 * cap) * cappedStream;
     const freeT = cappedStream + freeLeft / 4e9;
-    expect(wp(r, 'free').response.max / MS).toBeCloseTo((110 * NS + freeT * 1e12) / MS, 5);
+    expect(wp(r, 'free').response.max / MS).toBeCloseTo((120 * NS + freeT * 1e12) / MS, 5);
   });
 
   it('charges a shared bus twice for a memory-to-memory copy, a duplex bus once per lane', () => {
     const shared = base([once('c', [{ id: 'x', kind: 'transfer', from: 'ddr', to: 'sram', bytes: '1 MB' }])]);
     shared.memories[0].bandwidth = '100 GB/s';
     const r1 = run(shared);
-    // Read and write legs both cross the 16 GB/s NoC: effective 8 GB/s. Latency: 100+10+10+0 ns.
-    expect(wp(r1, 'c').response.max).toBe(120 * NS + 125 * US);
+    // Read and write legs both cross the 16 GB/s NoC: effective 8 GB/s. Latency: 10+100+10+10+0 ns.
+    expect(wp(r1, 'c').response.max).toBe(130 * NS + 125 * US);
 
     const duplex = structuredClone(shared);
     duplex.buses[0].duplex = true;
     const r2 = run(duplex);
-    expect(wp(r2, 'c').response.max).toBe(120 * NS + 62.5 * US);
+    expect(wp(r2, 'c').response.max).toBe(130 * NS + 62.5 * US);
     expect(res(r2, 'noc:rd').bytes).toBeCloseTo(1e6, 3);
     expect(res(r2, 'noc:wr').bytes).toBeCloseTo(1e6, 3);
   });
@@ -147,9 +148,9 @@ describe('transfers', () => {
     m.dmas![0].channels = 1;
     m.memories[0].bandwidth = '100 GB/s';
     const r = run(m);
-    // Serialised: 2 x (120 ns + 1 MB / 8 GB/s).
-    expect(wp(r, 'a').response.max).toBe(2 * (120 * NS + 125 * US));
-    expect(wp(r, 'a').breakdown['DMA wait @dma']).toBe(120 * NS + 125 * US);
+    // Serialised: 2 x (130 ns + 1 MB / 8 GB/s).
+    expect(wp(r, 'a').response.max).toBe(2 * (130 * NS + 125 * US));
+    expect(wp(r, 'a').breakdown['DMA wait @dma']).toBe(130 * NS + 125 * US);
   });
 });
 

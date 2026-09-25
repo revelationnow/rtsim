@@ -1,5 +1,5 @@
 import { compileExpr, evaluate, ExprError, toBase, type CExpr, type Quantity } from './expr';
-import type { ComponentKind, Expr, Model, SchedPolicy, StepSpec, TriggerSpec } from './types';
+import type { BusProtocol, BusSpec, ComponentKind, Expr, Model, SchedPolicy, StepSpec, TriggerSpec } from './types';
 
 /** Simulation time is integer picoseconds: exact up to ~2.5 hours of simulated time. */
 export const PS_PER_S = 1e12;
@@ -37,15 +37,60 @@ export interface CMemory {
   resWrite: number;
 }
 
+/** Packetization parameters of a bus (resolved from its protocol preset and overrides). */
+export interface CPacketParams {
+  payload: number;
+  readPayload: number;
+  maxRequest: number;
+  headerBytes: number;
+  gapPs: number;
+  policy: 'round-robin' | 'priority' | 'fifo';
+  cutThrough: boolean;
+}
+
 export interface CBus {
   idx: number;
   id: string;
   name: string;
+  protocol: BusProtocol;
+  mode: 'fluid' | 'packet';
   bwBps: number;
   latPs: number;
   duplex: boolean;
   resRead: number;
   resWrite: number;
+  pkt: CPacketParams;
+}
+
+/** One direction (or the shared lane) of a packet-mode bus: a server packets queue for. */
+export interface CPacketLane {
+  idx: number;
+  res: number;
+  id: string;
+  bus: number;
+  bwBps: number;
+  headerBytes: number;
+  gapPs: number;
+  latPs: number;
+  policy: CPacketParams['policy'];
+  cutThrough: boolean;
+}
+
+/** One step of a packet's journey: a fluid resource group, a packet lane, or a pure delay. */
+export type PStage =
+  | { kind: 'fluid'; usage: { res: number; coef: number }[] }
+  | { kind: 'server'; lane: number; payload: number }
+  | { kind: 'delay'; ps: number };
+
+export interface PacketPlan {
+  /** Data-order stages every packet passes through after its transaction's request phase. */
+  stages: PStage[];
+  /** Per transaction: request travel to the source plus the source's read latency. */
+  requestPs: number;
+  pktBytes: number;
+  txBytes: number;
+  /** Transactions the initiator may have outstanding. */
+  window: number;
 }
 
 export interface CDma {
@@ -66,6 +111,10 @@ export interface CResource {
   ownerKind: 'memory' | 'bus';
   lane: 'rw' | 'rd' | 'wr';
   capBps: number;
+  /** Index into packetLanes when this lane belongs to a packet-mode bus, else -1. */
+  packet: number;
+  /** Human label for the lane, e.g. "to dev_noc" for a PCIe direction. */
+  label?: string;
 }
 
 export interface CTransferPath {
@@ -82,6 +131,8 @@ export interface CTransferPath {
   dma: number;
   srcMem: number;
   dstMem: number;
+  /** Set when the route crosses a packet-mode bus. */
+  packet: PacketPlan | null;
 }
 
 interface CStepBase {
@@ -158,6 +209,8 @@ export interface CompiledModel {
   utilWindowPs: number;
   traceLimit: number;
   arbitration: 'priority' | 'fair';
+  packetLanes: CPacketLane[];
+  trainBytes: number;
 }
 
 export interface CompileOptions {
@@ -166,6 +219,16 @@ export interface CompileOptions {
 }
 
 export type CompileResult = { ok: true; model: CompiledModel; issues: Issue[] } | { ok: false; issues: Issue[] };
+
+/** PCIe per-lane signalling rate (GT/s) and line-encoding efficiency by generation. */
+const PCIE: Record<number, { gt: number; enc: number }> = {
+  1: { gt: 2.5, enc: 0.8 },
+  2: { gt: 5, enc: 0.8 },
+  3: { gt: 8, enc: 128 / 130 },
+  4: { gt: 16, enc: 128 / 130 },
+  5: { gt: 32, enc: 128 / 130 },
+  6: { gt: 64, enc: 242 / 256 },
+};
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
@@ -230,7 +293,7 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
   const resources: CResource[] = [];
   const addRes = (owner: string, ownerKind: 'memory' | 'bus', lane: CResource['lane'], capBps: number) => {
     const idx = resources.length;
-    resources.push({ idx, id: lane === 'rw' ? owner : `${owner}:${lane}`, owner, ownerKind, lane, capBps });
+    resources.push({ idx, id: lane === 'rw' ? owner : `${owner}:${lane}`, owner, ownerKind, lane, capBps, packet: -1 });
     return idx;
   };
 
@@ -278,36 +341,75 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
     };
   });
 
-  const buses: CBus[] = model.buses.map((b, idx) => {
+  const packetLanes: CPacketLane[] = [];
+  const buses: CBus[] = model.buses.map((b: BusSpec, idx) => {
     const path = `buses.${b.id}`;
     claim(path, b.id, 'bus', idx);
+    const protocol: BusProtocol = b.protocol ?? 'generic';
+    const mode = b.model ?? (protocol === 'generic' ? 'fluid' : 'packet');
+    const given = (v: Expr | undefined) => v !== undefined && v !== '';
+    const opt = (field: keyof BusSpec, q: Quantity): number | null =>
+      given(b[field] as Expr | undefined) ? num(`${path}.${field}`, b[field] as Expr, q) : null;
+    const width = opt('width', 'bytes');
+    const freq = opt('freq', 'freq');
+    const eff = opt('efficiency', 'count') ?? (protocol === 'pcie' ? 0.95 : 1);
+    if (Number.isFinite(eff) && (eff <= 0 || eff > 1)) err(`${path}.efficiency`, 'must be in (0, 1]');
     let bwBps: number;
-    if (b.bandwidth !== undefined && b.bandwidth !== '') {
+    if (given(b.bandwidth)) {
       bwBps = num(`${path}.bandwidth`, b.bandwidth, 'bandwidth');
-    } else if (b.width !== undefined && b.freq !== undefined) {
-      const width = num(`${path}.width`, b.width, 'bytes');
-      const freq = num(`${path}.freq`, b.freq, 'freq');
-      const eff = num(`${path}.efficiency`, b.efficiency, 'count', 1);
-      if (Number.isFinite(eff) && (eff <= 0 || eff > 1)) err(`${path}.efficiency`, 'must be in (0, 1]');
+    } else if (protocol === 'pcie') {
+      const gen = b.gen ?? 4;
+      const lanes = b.lanes ?? 4;
+      if (!PCIE[gen]) err(`${path}.gen`, 'PCIe generation must be 1 to 6');
+      if (![1, 2, 4, 8, 16, 32].includes(lanes)) warn(`${path}.lanes`, 'PCIe links are normally x1, x2, x4, x8, x16 or x32');
+      const g = PCIE[gen] ?? PCIE[4];
+      bwBps = (lanes * g.gt * 1e9 * g.enc * eff) / 8;
+    } else if (width !== null && freq !== null) {
       bwBps = width * freq * eff;
     } else {
-      err(`${path}.bandwidth`, 'give either bandwidth, or width and freq');
+      err(`${path}.bandwidth`, protocol === 'generic' ? 'give either bandwidth, or width and freq' : 'give bandwidth, or width and freq');
       bwBps = NaN;
     }
     positive(`${path}.bandwidth`, bwBps);
-    const duplex = b.duplex ?? false;
+
+    const payload = positive(
+      `${path}.maxPayload`,
+      opt('maxPayload', 'bytes') ?? { axi: 16 * (width ?? 16), noc: 64, pcie: 256, generic: mode === 'packet' ? 64 : Infinity }[protocol],
+    );
+    const pkt: CPacketParams = {
+      payload,
+      readPayload: positive(`${path}.readPayload`, opt('readPayload', 'bytes') ?? payload),
+      // Only request/completion protocols limit request size; elsewhere a transaction is as
+      // large as the initiator's burst or the largest packet on its route.
+      maxRequest: positive(`${path}.maxRequest`, opt('maxRequest', 'bytes') ?? (protocol === 'pcie' ? 512 : Infinity)),
+      headerBytes: nonNeg(`${path}.header`, opt('header', 'bytes') ?? { axi: 0, noc: width ?? 16, pcie: 24, generic: 0 }[protocol]),
+      gapPs: sToPs(nonNeg(`${path}.packetGap`, opt('packetGap', 'time') ?? (protocol === 'axi' && freq ? 1 / freq : 0))),
+      policy: b.arbitration ?? 'round-robin',
+      cutThrough: (b.switching ?? (protocol === 'axi' || protocol === 'noc' ? 'cut-through' : 'store-and-forward')) === 'cut-through',
+    };
+    const latPs = sToPs(nonNeg(`${path}.latency`, num(`${path}.latency`, b.latency, 'time', 0)));
+    const duplex = b.duplex ?? protocol !== 'generic';
     const resRead = addRes(b.id, 'bus', duplex ? 'rd' : 'rw', bwBps);
     const resWrite = duplex ? addRes(b.id, 'bus', 'wr', bwBps) : resRead;
-    return {
-      idx,
-      id: b.id,
-      name: b.name || b.id,
-      bwBps,
-      latPs: sToPs(nonNeg(`${path}.latency`, num(`${path}.latency`, b.latency, 'time', 0))),
-      duplex,
-      resRead,
-      resWrite,
-    };
+    if (mode === 'packet') {
+      for (const res of duplex ? [resRead, resWrite] : [resRead]) {
+        const lane = packetLanes.length;
+        resources[res].packet = lane;
+        packetLanes.push({
+          idx: lane,
+          res,
+          id: resources[res].id,
+          bus: idx,
+          bwBps,
+          headerBytes: pkt.headerBytes,
+          gapPs: pkt.gapPs,
+          latPs,
+          policy: pkt.policy,
+          cutThrough: pkt.cutThrough,
+        });
+      }
+    }
+    return { idx, id: b.id, name: b.name || b.id, protocol, mode, bwBps, latPs, duplex, resRead, resWrite, pkt };
   });
 
   const dmas: CDma[] = (model.dmas ?? []).map((d, idx) => {
@@ -339,6 +441,20 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
   });
   for (const [id, info] of kinds) {
     if (info.kind === 'bus' && adj.get(id)!.size === 0) warn(`buses.${id}`, 'is not linked to anything');
+  }
+  // A PCIe link is point to point; its two lanes are physical directions, not read/write.
+  const linkEnds = new Map<string, [string, string]>();
+  for (const b of buses) {
+    if (b.protocol !== 'pcie' || !b.duplex) continue;
+    const ends = [...(adj.get(b.id) ?? [])].sort();
+    if (ends.length !== 2) {
+      warn(`buses.${b.id}`, 'a PCIe link should connect exactly two components; lanes fall back to read/write');
+      continue;
+    }
+    linkEnds.set(b.id, [ends[0], ends[1]]);
+    resources[b.resRead].label = `to ${ends[1]}`;
+    resources[b.resWrite].label = `to ${ends[0]}`;
+    for (const l of packetLanes) if (l.bus === b.idx) l.id = resources[l.res].id;
   }
 
   const kindOf = (id: string) => kinds.get(id)?.kind;
@@ -407,21 +523,53 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
       err(path, `no route from ${initiator} to ${s.to} through buses`);
       return null;
     }
-    const usage = new Map<number, number>();
-    const use = (res: number) => usage.set(res, (usage.get(res) ?? 0) + 1);
     const srcMem = fk === 'memory' ? memories[kinds.get(s.from)!.idx] : null;
     const dstMem = tk === 'memory' ? memories[kinds.get(s.to)!.idx] : null;
+    const busOf = (h: string) => buses[kinds.get(h)!.idx];
+    const init = kinds.get(initiator)!;
+    const src = init.kind === 'dma' ? dmas[init.idx] : processors[init.idx];
+
+    // Packet size for this transfer: the initiator's burst, clipped to every packet bus's payload
+    // in the direction the data travels (read leg = completions / read data).
+    /** Lane a hop uses: physical direction on PCIe links, read/write relative to the initiator elsewhere. */
+    const laneOf = (b: CBus, dir: 'rd' | 'wr', prev: string) => {
+      const ends = linkEnds.get(b.id);
+      if (ends) return prev === ends[0] ? b.resRead : b.resWrite;
+      return dir === 'rd' ? b.resRead : b.resWrite;
+    };
+    const hops = [
+      ...readHops.map((h, i) => ({ bus: busOf(h), dir: 'rd' as const, prev: i ? readHops[i - 1] : s.from })),
+      ...writeHops.map((h, i) => ({ bus: busOf(h), dir: 'wr' as const, prev: i ? writeHops[i - 1] : initiator })),
+    ].map((x) => ({ ...x, res: laneOf(x.bus, x.dir, x.prev) }));
+    const payloadOf = (b: CBus, dir: 'rd' | 'wr') => (dir === 'rd' ? b.pkt.readPayload : b.pkt.payload);
+    const packetHops = hops.filter((x) => x.bus.mode === 'packet');
+    const requestLimit = packetHops.reduce((m, x) => Math.min(m, x.bus.pkt.maxRequest), Infinity);
+    const largestPacket = packetHops.reduce((m, x) => Math.max(m, payloadOf(x.bus, x.dir)), 0);
+    // Requests never exceed the route's request limit (PCIe max read request size).
+    const txBytes = Math.min(src.burst ?? Infinity, requestLimit);
+    const txEff = Number.isFinite(txBytes) ? txBytes : largestPacket;
+    const pktBytes = packetHops.reduce((m, x) => Math.min(m, payloadOf(x.bus, x.dir)), txEff);
+    /** Bytes a bus carries per payload byte, counting headers and inter-packet gaps. */
+    const overhead = (b: CBus, dir: 'rd' | 'wr') => {
+      // Each bus packetizes a transaction at its own payload size.
+      const p = Math.min(payloadOf(b, dir), packetHops.length ? txEff : (src.burst ?? Infinity));
+      if (!Number.isFinite(p)) return 1;
+      return 1 + (b.pkt.headerBytes + (b.pkt.gapPs / PS_PER_S) * b.bwBps) / p;
+    };
+
+    const usage = new Map<number, number>();
+    const use = (res: number, coef = 1) => usage.set(res, (usage.get(res) ?? 0) + coef);
     if (srcMem) use(srcMem.resRead);
-    for (const h of readHops) use(buses[kinds.get(h)!.idx].resRead);
-    for (const h of writeHops) use(buses[kinds.get(h)!.idx].resWrite);
+    for (const x of hops) use(x.res, overhead(x.bus, x.dir));
     if (dstMem) use(dstMem.resWrite);
 
     const readHopLat = readHops.reduce((a, h) => a + latOf(h), 0);
     const writeHopLat = writeHops.reduce((a, h) => a + latOf(h), 0);
-    const latencyPs = (srcMem?.readLatPs ?? 0) + readHopLat + writeHopLat + (dstMem?.writeLatPs ?? 0);
+    // A read is a round trip: the request crosses the read leg before data comes back over it.
+    const reads = srcMem !== null || readHops.length > 0;
+    const requestPs = reads ? readHopLat + (srcMem?.readLatPs ?? 0) : 0;
+    const latencyPs = requestPs + readHopLat + writeHopLat + (dstMem?.writeLatPs ?? 0);
 
-    const init = kinds.get(initiator)!;
-    const src = init.kind === 'dma' ? dmas[init.idx] : processors[init.idx];
     let capBps = Infinity;
     if (src.maxOutstanding != null && src.burst != null) {
       const window = src.maxOutstanding * src.burst;
@@ -432,6 +580,45 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
     }
     const usageArr = [...usage].map(([res, coef]) => ({ res, coef }));
     const idealBps = usageArr.reduce((m, u) => Math.min(m, resources[u.res].capBps / u.coef), capBps);
+
+    let packet: PacketPlan | null = null;
+    if (packetHops.length) {
+      const stages: PStage[] = [];
+      const fluid = (res: number, coef: number) => {
+        const last = stages[stages.length - 1];
+        if (last?.kind === 'fluid') {
+          const u = last.usage.find((x) => x.res === res);
+          if (u) u.coef += coef;
+          else last.usage.push({ res, coef });
+        } else stages.push({ kind: 'fluid', usage: [{ res, coef }] });
+      };
+      const delay = (ps: number) => {
+        if (ps <= 0) return;
+        const last = stages[stages.length - 1];
+        if (last?.kind === 'delay') last.ps += ps;
+        else stages.push({ kind: 'delay', ps });
+      };
+      if (srcMem) fluid(srcMem.resRead, 1);
+      for (const x of hops) {
+        const res = x.res;
+        if (x.bus.mode === 'packet') stages.push({ kind: 'server', lane: resources[res].packet, payload: payloadOf(x.bus, x.dir) });
+        else {
+          fluid(res, overhead(x.bus, x.dir));
+          delay(x.bus.latPs);
+        }
+      }
+      if (dstMem) {
+        fluid(dstMem.resWrite, 1);
+        delay(dstMem.writeLatPs);
+      }
+      packet = {
+        stages,
+        requestPs,
+        pktBytes,
+        txBytes: Math.max(txEff, pktBytes),
+        window: src.maxOutstanding ?? Infinity,
+      };
+    }
     return {
       initiator,
       readHops,
@@ -443,6 +630,7 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
       dma: init.kind === 'dma' ? init.idx : -1,
       srcMem: srcMem?.idx ?? -1,
       dstMem: dstMem?.idx ?? -1,
+      packet,
     };
   };
 
@@ -687,6 +875,8 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
       ? Math.max(1, Math.round(durationPs / 100))
       : sToPs(positive('sim.utilWindow', num('sim.utilWindow', model.sim.utilWindow, 'time')));
 
+  const trainBytes = positive('sim.maxTrainBytes', num('sim.maxTrainBytes', model.sim?.maxTrainBytes, 'bytes', 4096));
+
   if (issues.some((i) => i.severity === 'error')) return { ok: false, issues };
   return {
     ok: true,
@@ -705,6 +895,8 @@ export function compile(model: Model, options: CompileOptions = {}): CompileResu
       utilWindowPs,
       traceLimit: model.sim?.traceLimit ?? 200_000,
       arbitration: model.sim?.arbitration ?? 'priority',
+      packetLanes,
+      trainBytes,
     },
   };
 }
